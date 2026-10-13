@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block title %}Global Admin{% endblock %}
+{% block heading %}Global Admin Console{% endblock %}
+{% block content %}
+<div class="panel">
+  <div class="panel-head"><div><h3>All supermarkets</h3><p>Global administrator access across every registered store.</p></div><button class="btn primary no-print" onclick="window.print()">Print</button></div>
+  <div class="table-wrap"><table><thead><tr><th>Supermarket</th><th>Users</th><th>Products</th><th>Total sales</th><th class="no-print">Action</th></tr></thead><tbody>
+  {% for row in summaries %}<tr><td><strong>{{ row.store.name }}</strong><br><small>Store ID: {{ row.store.id }}</small></td><td>{{ row.users }}</td><td>{{ row.products }}</td><td>{{ row.sales|money }}</td><td class="no-print"><form method="post" action="{{ url_for('admin_open_store', sid=row.store.id) }}"><button class="btn secondary" type="submit">Open store</button></form></td></tr>{% else %}<tr><td colspan="5" class="empty">No stores found.</td></tr>{% endfor %}
+  </tbody></table></div>
+</div>
+<div class="panel">
+  <div class="panel-head"><div><h3>User permissions</h3><p>Select which modules each store user can access. Changes take effect on their next request.</p></div></div>
+  {% for u in users %}<div class="permission-card"><div><strong>{{ u.name }}</strong><p class="muted">{{ u.email }} · Store ID {{ u.supermarket_id }}</p></div>
+    <form method="post" action="{{ url_for('admin_permissions', user_id=u.id) }}" class="permission-form">
+      {% set perms = (u.permissions or '').split(',') %}
+      {% for key,label in [('sales','Sales'),('purchases','Purchases'),('products','Stock / Products'),('expenses','Expenses'),('reports','Reports'),('accounting','Accounting'),('receivables_payables','AR / AP')] %}<label class="permission-option"><input type="checkbox" name="permissions" value="{{ key }}" {% if key in perms %}checked{% endif %}> {{ label }}</label>{% endfor %}
+      <button class="btn primary" type="submit">Save permissions</button>
+    </form>
+  </div>{% else %}<p class="empty">No store users registered yet.</p>{% endfor %}
+</div>
+<div class="flash info">Security: change the default global admin password before using this application with real store data. Set SUPERADMIN_EMAIL and SUPERADMIN_PASSWORD in your environment before the first launch.</div>
+{% endblock %}

@@ -32,6 +32,8 @@ class User(db.Model):
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(160), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
+    is_superadmin = db.Column(db.Boolean, default=False, nullable=False)
+    permissions = db.Column(db.String(500), default='sales,purchases,products,expenses,reports,accounting,receivables_payables', nullable=False)
 
 class Product(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -85,6 +87,21 @@ class SaleItem(db.Model):
     line_total = db.Column(db.Float, nullable=False)
     product = db.relationship('Product')
 
+class PaymentTransaction(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    supermarket_id = db.Column(db.Integer, db.ForeignKey('supermarket.id'), nullable=False, index=True)
+    direction = db.Column(db.String(10), nullable=False)  # receipt or payment
+    sale_id = db.Column(db.Integer, db.ForeignKey('sale.id'), nullable=True)
+    purchase_id = db.Column(db.Integer, db.ForeignKey('purchase.id'), nullable=True)
+    party_name = db.Column(db.String(150), default='')
+    amount = db.Column(db.Float, nullable=False)
+    payment_method = db.Column(db.String(30), nullable=False, default='Cash')
+    payment_date = db.Column(db.Date, default=date.today, nullable=False, index=True)
+    reference = db.Column(db.String(100), default='')
+    note = db.Column(db.String(250), default='')
+    sale = db.relationship('Sale')
+    purchase = db.relationship('Purchase')
+
 class Expense(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     supermarket_id = db.Column(db.Integer, db.ForeignKey('supermarket.id'), nullable=False, index=True)
@@ -105,15 +122,43 @@ with app.app_context():
             connection.exec_driver_sql('ALTER TABLE purchase ADD COLUMN paid FLOAT NOT NULL DEFAULT 0')
         if 'payment_method' not in purchase_columns:
             connection.exec_driver_sql("ALTER TABLE purchase ADD COLUMN payment_method VARCHAR(30) NOT NULL DEFAULT 'Credit'")
+        user_columns = {column['name'] for column in inspector.get_columns('user')}
+        if 'is_superadmin' not in user_columns:
+            connection.exec_driver_sql('ALTER TABLE user ADD COLUMN is_superadmin BOOLEAN NOT NULL DEFAULT 0')
+        if 'permissions' not in user_columns:
+            connection.exec_driver_sql("ALTER TABLE user ADD COLUMN permissions VARCHAR(500) NOT NULL DEFAULT 'sales,purchases,products,expenses,reports,accounting,receivables_payables'")
+    # Provision a global administrator on first run. Override credentials using environment variables.
+    admin_email = os.environ.get('SUPERADMIN_EMAIL', 'admin@supermart.local').strip().lower()
+    admin_password = os.environ.get('SUPERADMIN_PASSWORD', 'SuperAdmin@2026')
+    system_store = Supermarket.query.filter_by(name='SuperMart Administration').first()
+    if not system_store:
+        system_store = Supermarket(name='SuperMart Administration')
+        db.session.add(system_store); db.session.flush()
+    global_admin = User.query.filter_by(email=admin_email).first()
+    if not global_admin:
+        global_admin = User(supermarket_id=system_store.id, name='Global Administrator', email=admin_email,
+                            password_hash=generate_password_hash(admin_password), is_superadmin=True, permissions='all')
+        db.session.add(global_admin); db.session.commit()
+    elif not global_admin.is_superadmin:
+        global_admin.is_superadmin = True; global_admin.permissions = 'all'; db.session.commit()
 
 def store_id():
-    return session.get('supermarket_id')
+    return session.get('active_store_id') or session.get('supermarket_id')
+
+PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables'}
 
 def login_required(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
         if not session.get('user_id'):
             return redirect(url_for('login'))
+        current = db.session.get(User, session['user_id'])
+        if not current:
+            session.clear(); return redirect(url_for('login'))
+        required = PERMISSIONS.get(fn.__name__)
+        if required and not current.is_superadmin and required not in (current.permissions or '').split(','):
+            flash('Your account does not have permission to access that section.', 'error')
+            return redirect(url_for('dashboard'))
         return fn(*args, **kwargs)
     return wrapped
 
@@ -134,7 +179,7 @@ def date_range():
 
 @app.context_processor
 def common_context():
-    return {'store_name': session.get('store_name', 'SuperMart'), 'today': date.today().isoformat()}
+    return {'store_name': session.get('store_name', 'SuperMart'), 'today': date.today().isoformat(), 'is_superadmin': bool(session.get('is_superadmin'))}
 
 @app.route('/')
 def index():
@@ -159,7 +204,7 @@ def register():
             db.session.add(supermarket); db.session.flush()
             user = User(supermarket_id=supermarket.id, name=name, email=email, password_hash=generate_password_hash(password))
             db.session.add(user); db.session.commit()
-            session.update(user_id=user.id, supermarket_id=supermarket.id, store_name=supermarket.name, user_name=user.name)
+            session.update(user_id=user.id, supermarket_id=supermarket.id, active_store_id=supermarket.id, store_name=supermarket.name, user_name=user.name, is_superadmin=False)
             flash('Your supermarket workspace is ready.', 'success')
             return redirect(url_for('dashboard'))
     return render_template('register.html')
@@ -172,8 +217,8 @@ def login():
         user = User.query.filter_by(email=email).first()
         if user and check_password_hash(user.password_hash, password):
             supermarket = db.session.get(Supermarket, user.supermarket_id)
-            session.clear(); session.update(user_id=user.id, supermarket_id=user.supermarket_id, store_name=supermarket.name, user_name=user.name)
-            return redirect(url_for('dashboard'))
+            session.clear(); session.update(user_id=user.id, supermarket_id=user.supermarket_id, active_store_id=(None if user.is_superadmin else user.supermarket_id), store_name=supermarket.name, user_name=user.name, is_superadmin=bool(user.is_superadmin))
+            return redirect(url_for('admin_console') if user.is_superadmin else url_for('dashboard'))
         flash('Incorrect email or password.', 'error')
     return render_template('login.html')
 
@@ -181,9 +226,59 @@ def login():
 def logout():
     session.clear(); return redirect(url_for('login'))
 
+@app.route('/admin')
+@login_required
+def admin_console():
+    user = db.session.get(User, session['user_id'])
+    if not user.is_superadmin:
+        flash('Global administrator access required.', 'error'); return redirect(url_for('dashboard'))
+    stores = Supermarket.query.order_by(Supermarket.name).all()
+    users = User.query.filter_by(is_superadmin=False).order_by(User.email).all()
+    summaries = []
+    for store in stores:
+        summaries.append({'store': store,
+            'sales': db.session.query(func.coalesce(func.sum(Sale.total), 0)).filter_by(supermarket_id=store.id).scalar() or 0,
+            'users': User.query.filter_by(supermarket_id=store.id, is_superadmin=False).count(),
+            'products': Product.query.filter_by(supermarket_id=store.id).count()})
+    return render_template('admin.html', stores=stores, users=users, summaries=summaries)
+
+@app.route('/admin/store/<int:sid>/open', methods=['POST'])
+@login_required
+def admin_open_store(sid):
+    user = db.session.get(User, session['user_id'])
+    if not user.is_superadmin: return ('Forbidden', 403)
+    store = db.session.get(Supermarket, sid)
+    if not store: return ('Store not found', 404)
+    session['active_store_id'] = store.id; session['store_name'] = store.name
+    flash(f'Now managing {store.name}. Use Global Admin to return to all stores.', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/admin/users/<int:user_id>/permissions', methods=['POST'])
+@login_required
+def admin_permissions(user_id):
+    admin = db.session.get(User, session['user_id'])
+    if not admin.is_superadmin: return ('Forbidden', 403)
+    target = db.session.get(User, user_id)
+    if not target or target.is_superadmin: return ('User not found', 404)
+    allowed = {'sales','purchases','products','expenses','reports','accounting','receivables_payables'}
+    selected = set(request.form.getlist('permissions')) & allowed
+    target.permissions = ','.join(sorted(selected))
+    db.session.commit(); flash(f'Permissions updated for {target.email}.', 'success')
+    return redirect(url_for('admin_console'))
+
+@app.route('/admin/all-stores')
+@login_required
+def admin_all_stores():
+    user = db.session.get(User, session['user_id'])
+    if not user.is_superadmin: return ('Forbidden', 403)
+    session.pop('active_store_id', None); session['store_name'] = 'All Stores'
+    return redirect(url_for('admin_console'))
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
+    if session.get('is_superadmin') and not session.get('active_store_id'):
+        return redirect(url_for('admin_console'))
     sid = store_id(); today = date.today()
     sales_today = db.session.query(func.coalesce(func.sum(Sale.total),0)).filter(Sale.supermarket_id==sid, func.date(Sale.sale_date)==today.isoformat()).scalar() or 0
     purchases_today = db.session.query(func.coalesce(func.sum(Purchase.total),0)).filter_by(supermarket_id=sid, purchase_date=today).scalar() or 0
@@ -359,7 +454,8 @@ def receivables_payables():
     purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid, Purchase.purchase_date >= start, Purchase.purchase_date <= end).order_by(Purchase.purchase_date.desc()).all()
     receivables = [sale for sale in sales_rows if sale.total - (sale.paid or 0) > 0.009]
     payables = [purchase for purchase in purchase_rows if purchase.total - (purchase.paid or 0) > 0.009]
-    return render_template('receivables_payables.html', start=start.isoformat(), end=end.isoformat(), receivables=receivables, payables=payables,
+    transactions = PaymentTransaction.query.filter_by(supermarket_id=sid).filter(PaymentTransaction.payment_date >= start, PaymentTransaction.payment_date <= end).order_by(PaymentTransaction.payment_date.desc(), PaymentTransaction.id.desc()).all()
+    return render_template('receivables_payables.html', start=start.isoformat(), end=end.isoformat(), receivables=receivables, payables=payables, transactions=transactions,
         receivable_total=sum(s.total - (s.paid or 0) for s in receivables), payable_total=sum(p.total - (p.paid or 0) for p in payables))
 
 @app.route('/receivables-payables/export.xlsx')
@@ -389,6 +485,48 @@ def export_receivables_payables():
             sheet.column_dimensions[get_column_letter(col[0].column)].width = width
     output = BytesIO(); wb.save(output); output.seek(0)
     return send_file(output, as_attachment=True, download_name=f'supermart_ar_ap_{start}_{end}.xlsx', mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+@app.route('/payments/receive', methods=['POST'])
+@login_required
+def receive_customer_payment():
+    sid = store_id()
+    try:
+        sale = Sale.query.filter_by(id=int(request.form['sale_id']), supermarket_id=sid).first_or_404()
+        amount = round(float(request.form.get('amount', 0)), 2)
+        if amount <= 0 or amount > round(sale.total - (sale.paid or 0), 2) + 0.001:
+            raise ValueError('Enter an amount greater than zero and no more than the outstanding balance.')
+        method = request.form.get('payment_method', 'Cash')
+        pdate = datetime.strptime(request.form.get('payment_date') or date.today().isoformat(), '%Y-%m-%d').date()
+        sale.paid = round((sale.paid or 0) + amount, 2)
+        tx = PaymentTransaction(supermarket_id=sid, direction='receipt', sale_id=sale.id, party_name=sale.customer_name, amount=amount, payment_method=method, payment_date=pdate, reference=request.form.get('reference','').strip(), note=request.form.get('note','').strip())
+        db.session.add(tx); db.session.commit(); flash('Customer payment received and balance updated.', 'success')
+    except (ValueError, KeyError) as exc:
+        db.session.rollback(); flash(str(exc) or 'Invalid payment details.', 'error')
+    return redirect(url_for('payment_receipt', payment_id=tx.id)) if 'tx' in locals() else redirect(url_for('receivables_payables'))
+
+@app.route('/payments/pay-supplier', methods=['POST'])
+@login_required
+def pay_supplier():
+    sid = store_id()
+    try:
+        purchase = Purchase.query.filter_by(id=int(request.form['purchase_id']), supermarket_id=sid).first_or_404()
+        amount = round(float(request.form.get('amount', 0)), 2)
+        if amount <= 0 or amount > round(purchase.total - (purchase.paid or 0), 2) + 0.001:
+            raise ValueError('Enter an amount greater than zero and no more than the outstanding balance.')
+        method = request.form.get('payment_method', 'Cash')
+        pdate = datetime.strptime(request.form.get('payment_date') or date.today().isoformat(), '%Y-%m-%d').date()
+        purchase.paid = round((purchase.paid or 0) + amount, 2)
+        tx = PaymentTransaction(supermarket_id=sid, direction='payment', purchase_id=purchase.id, party_name=purchase.supplier, amount=amount, payment_method=method, payment_date=pdate, reference=request.form.get('reference','').strip(), note=request.form.get('note','').strip())
+        db.session.add(tx); db.session.commit(); flash('Supplier payment saved and payable balance updated.', 'success')
+    except (ValueError, KeyError) as exc:
+        db.session.rollback(); flash(str(exc) or 'Invalid payment details.', 'error')
+    return redirect(url_for('payment_receipt', payment_id=tx.id)) if 'tx' in locals() else redirect(url_for('receivables_payables'))
+
+@app.route('/payments/<int:payment_id>/receipt')
+@login_required
+def payment_receipt(payment_id):
+    payment = PaymentTransaction.query.filter_by(id=payment_id, supermarket_id=store_id()).first_or_404()
+    return render_template('payment_receipt.html', payment=payment)
 
 @app.route('/health')
 def health(): return {'status':'ok'}

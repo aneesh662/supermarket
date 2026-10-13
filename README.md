@@ -41,3 +41,21 @@ SQLite is best suited to a single server or a small local installation. If you d
 - Receivables/payables are calculated from the invoice/purchase total less the amount recorded as paid. This version does not yet support posting later payment collections/settlements against an old invoice.
 - Accounting figures are estimates for day-to-day management, not a complete double-entry ledger or statutory tax report. Cost of goods sold is based on the cost price saved on each sale line.
 - Before real commercial use, set a strong `SECRET_KEY`, use HTTPS when hosted online, make regular backups, and test all workflows with sample data.
+
+
+## Global administrator and permissions
+
+On a fresh database, the app creates a global administrator account automatically:
+
+- Email: `admin@supermart.local`
+- Password: `SuperAdmin@2026`
+- Login: `/login`
+- Global console: `/admin`
+
+**Change these credentials before using real data.** Set `SUPERADMIN_EMAIL` and `SUPERADMIN_PASSWORD` in the environment before the first launch to choose credentials. If a global admin has already been created in the database, changing environment variables does not reset that account's password.
+
+The global administrator can view all registered supermarkets, open a store workspace, and choose module permissions for each store user (Sales, Purchases, Stock/Products, Expenses, Reports, Accounting, and AR/AP). Store users only see data for their own store.
+
+## Accounts receivable and payable settlements
+
+In Receivables & Payables, use **Receive payment** against an outstanding customer invoice or **Pay supplier** against a supplier purchase. Enter the amount, date, method, and optional reference. The amount updates the invoice balance, is logged in payment history, and opens a printable receipt/voucher. Partial payments are supported; a payment cannot exceed the outstanding balance.
