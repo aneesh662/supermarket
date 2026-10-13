@@ -91,3 +91,11 @@ Existing SQLite databases are migrated automatically for the new `expiry_date` f
 - **Customer-wise Total Report** groups sales by customer and shows sales total, sales returns, amount received, outstanding balance and invoice count, with a grand total row.
 - Both reports support date filters, print and Excel export. The report navigation is permission-controlled under Reports.
 - Responsive layout safeguards cover small phones, tablets, laptops and desktop screens; wide tables scroll horizontally on narrow screens.
+
+
+## GST / CST tax setup
+- Set each product's GST rate (0%, 5%, 12%, 18%, or 28%) and optional legacy CST rate in Products & Stock.
+- Purchase and sale forms calculate tax from the product rate. Choose Local / intra-state to split GST into CGST + SGST, or Inter-state to record IGST.
+- Open **GST / CST Tax Report** to filter by period, print the summary, and export the tax workbook to Excel.
+- CST is included only as a legacy option. GST rates, tax classifications, place-of-supply rules, exemptions, HSN, input tax credit and returns must be reviewed by your accountant/CA. The report is a preparation summary and does not file directly to the government portal.
+- Existing databases are migrated automatically with zero tax rates; verify product rates before using the tax calculation. Back up `instance/supermart.db` before upgrading.

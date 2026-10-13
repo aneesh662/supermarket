@@ -46,6 +46,8 @@ class Product(db.Model):
     stock_qty = db.Column(db.Float, default=0)
     low_stock_level = db.Column(db.Float, default=5)
     expiry_date = db.Column(db.Date, nullable=True, index=True)
+    gst_rate = db.Column(db.Float, default=0, nullable=False)
+    cst_rate = db.Column(db.Float, default=0, nullable=False)
     active = db.Column(db.Boolean, default=True)
     __table_args__ = (db.UniqueConstraint('supermarket_id', 'name', name='uq_product_name_store'),)
 
@@ -62,6 +64,14 @@ class Purchase(db.Model):
     note = db.Column(db.String(250), default='')
     paid = db.Column(db.Float, default=0, nullable=False)
     payment_method = db.Column(db.String(30), default='Credit', nullable=False)
+    base_total = db.Column(db.Float, default=0, nullable=False)
+    tax_type = db.Column(db.String(10), default='GST', nullable=False)
+    supply_type = db.Column(db.String(20), default='Local', nullable=False)
+    cgst = db.Column(db.Float, default=0, nullable=False)
+    sgst = db.Column(db.Float, default=0, nullable=False)
+    igst = db.Column(db.Float, default=0, nullable=False)
+    cst = db.Column(db.Float, default=0, nullable=False)
+    tax_amount = db.Column(db.Float, default=0, nullable=False)
     product = db.relationship('Product')
 
 class Sale(db.Model):
@@ -75,6 +85,13 @@ class Sale(db.Model):
     discount = db.Column(db.Float, default=0)
     total = db.Column(db.Float, nullable=False)
     paid = db.Column(db.Float, default=0)
+    tax_type = db.Column(db.String(10), default='GST', nullable=False)
+    supply_type = db.Column(db.String(20), default='Local', nullable=False)
+    cgst = db.Column(db.Float, default=0, nullable=False)
+    sgst = db.Column(db.Float, default=0, nullable=False)
+    igst = db.Column(db.Float, default=0, nullable=False)
+    cst = db.Column(db.Float, default=0, nullable=False)
+    tax_amount = db.Column(db.Float, default=0, nullable=False)
     items = db.relationship('SaleItem', backref='sale', cascade='all, delete-orphan')
     __table_args__ = (db.UniqueConstraint('supermarket_id', 'invoice_no', name='uq_invoice_store'),)
 
@@ -170,7 +187,19 @@ with app.app_context():
     inspector = inspect(db.engine)
     purchase_columns = {column['name'] for column in inspector.get_columns('purchase')}
     product_columns = {column['name'] for column in inspector.get_columns('product')}
+    purchase_columns = {column['name'] for column in inspector.get_columns('purchase')}
+    sale_columns = {column['name'] for column in inspector.get_columns('sale')}
     with db.engine.begin() as connection:
+        for col, ddl in {
+            'gst_rate':'FLOAT NOT NULL DEFAULT 0', 'cst_rate':'FLOAT NOT NULL DEFAULT 0'
+        }.items():
+            if col not in product_columns: connection.exec_driver_sql(f'ALTER TABLE product ADD COLUMN {col} {ddl}')
+        for col, ddl in {
+            'base_total':'FLOAT NOT NULL DEFAULT 0','tax_type':"VARCHAR(10) NOT NULL DEFAULT 'GST'",'supply_type':"VARCHAR(20) NOT NULL DEFAULT 'Local'",'cgst':'FLOAT NOT NULL DEFAULT 0','sgst':'FLOAT NOT NULL DEFAULT 0','igst':'FLOAT NOT NULL DEFAULT 0','cst':'FLOAT NOT NULL DEFAULT 0','tax_amount':'FLOAT NOT NULL DEFAULT 0'
+        }.items():
+            if col not in purchase_columns: connection.exec_driver_sql(f'ALTER TABLE purchase ADD COLUMN {col} {ddl}')
+            if col not in sale_columns: connection.exec_driver_sql(f'ALTER TABLE sale ADD COLUMN {col} {ddl}')
+        connection.exec_driver_sql('UPDATE purchase SET base_total = total WHERE base_total = 0')
         if 'expiry_date' not in purchase_columns:
             connection.exec_driver_sql('ALTER TABLE purchase ADD COLUMN expiry_date DATE')
         if 'expiry_date' not in product_columns:
@@ -206,7 +235,7 @@ with app.app_context():
 def store_id():
     return session.get('active_store_id') or session.get('supermarket_id')
 
-PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables', 'returns':'purchases', 'sales_return':'sales', 'purchase_return':'purchases', 'aging_report':'reports', 'export_aging_report':'reports', 'supplier_report':'reports', 'supplier_report_export':'reports', 'customer_report':'reports', 'customer_report_export':'reports', 'expiry_report':'products', 'expiry_report_export':'products', 'settings_lists':'expenses', 'toggle_setting_list':'expenses'}
+PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables', 'returns':'purchases', 'sales_return':'sales', 'purchase_return':'purchases', 'aging_report':'reports', 'export_aging_report':'reports', 'supplier_report':'reports', 'supplier_report_export':'reports', 'customer_report':'reports', 'customer_report_export':'reports', 'tax_report':'reports', 'tax_report_export':'reports', 'expiry_report':'products', 'expiry_report_export':'products', 'settings_lists':'expenses', 'toggle_setting_list':'expenses'}
 
 def login_required(fn):
     @wraps(fn)
@@ -397,8 +426,8 @@ def products():
     if request.method=='POST':
         name=request.form.get('name','').strip(); sku=request.form.get('sku','').strip()
         try:
-            cost=float(request.form.get('cost_price',0)); price=float(request.form.get('selling_price',0)); qty=float(request.form.get('stock_qty',0)); low=float(request.form.get('low_stock_level',5))
-            if not name or min(cost,price,qty,low)<0: raise ValueError()
+            cost=float(request.form.get('cost_price',0)); price=float(request.form.get('selling_price',0)); qty=float(request.form.get('stock_qty',0)); low=float(request.form.get('low_stock_level',5)); gst_rate=float(request.form.get('gst_rate',0)); cst_rate=float(request.form.get('cst_rate',0))
+            if not name or min(cost,price,qty,low,gst_rate,cst_rate)<0 or gst_rate>100 or cst_rate>100: raise ValueError()
         except ValueError:
             flash('Enter a product name and valid non-negative numbers.', 'error'); return redirect(url_for('products'))
         existing=Product.query.filter_by(supermarket_id=sid,name=name).first()
@@ -407,7 +436,7 @@ def products():
         else:
             expiry_raw=request.form.get('expiry_date','').strip()
             expiry=datetime.strptime(expiry_raw,'%Y-%m-%d').date() if expiry_raw else None
-            db.session.add(Product(supermarket_id=sid,name=name,sku=sku or None,unit=request.form.get('unit','pcs'),cost_price=cost,selling_price=price,stock_qty=qty,low_stock_level=low,expiry_date=expiry)); db.session.commit(); flash('Product added.', 'success')
+            db.session.add(Product(supermarket_id=sid,name=name,sku=sku or None,unit=request.form.get('unit','pcs'),cost_price=cost,selling_price=price,stock_qty=qty,low_stock_level=low,expiry_date=expiry,gst_rate=gst_rate,cst_rate=cst_rate)); db.session.commit(); flash('Product added.', 'success')
         return redirect(url_for('products'))
     q=request.args.get('q','').strip()
     query=Product.query.filter_by(supermarket_id=sid,active=True)
@@ -424,10 +453,19 @@ def purchases():
             qty=float(request.form['quantity']); cost=float(request.form['unit_cost'])
             if qty<=0 or cost<0: raise ValueError()
             pdate=datetime.strptime(request.form.get('purchase_date') or date.today().isoformat(),'%Y-%m-%d').date()
-            total=qty*cost
+            base_total=round(qty*cost,2)
+            tax_type=request.form.get('tax_type','GST').upper(); supply_type=request.form.get('supply_type','Local')
+            if tax_type not in ('GST','CST') or supply_type not in ('Local','Inter-state'): raise ValueError()
+            rate=float(product.gst_rate or 0) if tax_type=='GST' else float(product.cst_rate or 0)
+            tax=round(base_total*rate/100,2); cgst=sgst=igst=cst=0.0
+            if tax_type=='GST':
+                if supply_type=='Local': cgst=round(tax/2,2); sgst=round(tax-cgst,2)
+                else: igst=tax
+            else: cst=tax
+            total=round(base_total+tax,2)
             expiry_raw=request.form.get('expiry_date','').strip()
             expiry=datetime.strptime(expiry_raw,'%Y-%m-%d').date() if expiry_raw else None
-            db.session.add(Purchase(supermarket_id=sid,product_id=product.id,supplier=request.form.get('supplier','').strip(),quantity=qty,unit_cost=cost,total=total,purchase_date=pdate,expiry_date=expiry,note=request.form.get('note','').strip(),paid=min(max(float(request.form.get('paid',0)),0),total),payment_method=request.form.get('payment_method','Credit')))
+            db.session.add(Purchase(supermarket_id=sid,product_id=product.id,supplier=request.form.get('supplier','').strip(),quantity=qty,unit_cost=cost,total=total,base_total=base_total,tax_type=tax_type,supply_type=supply_type,cgst=cgst,sgst=sgst,igst=igst,cst=cst,tax_amount=tax,purchase_date=pdate,expiry_date=expiry,note=request.form.get('note','').strip(),paid=min(max(float(request.form.get('paid',0)),0),total),payment_method=request.form.get('payment_method','Credit')))
             product.stock_qty += qty; product.cost_price=cost
             if expiry: product.expiry_date=expiry
             db.session.commit(); flash('Purchase saved and stock updated.', 'success')
@@ -447,7 +485,9 @@ def sales():
             ids=request.form.getlist('product_id[]'); qtys=request.form.getlist('quantity[]')
             discount=float(request.form.get('discount',0)); paid=float(request.form.get('paid',0))
             if discount<0 or paid<0: raise ValueError()
-            line_data=[]; subtotal=0; requested_by_product={}
+            line_data=[]; subtotal=0; requested_by_product={}; gst_tax=0.0; cst_tax=0.0; cgst=sgst=igst=cst=0.0
+            tax_type=request.form.get('tax_type','GST').upper(); supply_type=request.form.get('supply_type','Local')
+            if tax_type not in ('GST','CST') or supply_type not in ('Local','Inter-state'): raise ValueError('Choose a valid tax type and supply type.')
             for pid, qraw in zip(ids,qtys):
                 if not pid or not qraw: continue
                 product=Product.query.filter_by(id=int(pid),supermarket_id=sid,active=True).first()
@@ -455,15 +495,27 @@ def sales():
                 if not product or qty<=0: raise ValueError('Invalid product or quantity.')
                 requested_by_product[product.id] = requested_by_product.get(product.id, 0) + qty
                 if product.stock_qty < requested_by_product[product.id]: raise ValueError(f'Not enough stock for {product.name}. Available: {product.stock_qty:g}')
-                line_total=qty*product.selling_price; subtotal+=line_total
-                line_data.append((product,qty,line_total))
+                line_total=round(qty*product.selling_price,2); subtotal+=line_total
+                rate=float(product.gst_rate or 0) if tax_type=='GST' else float(product.cst_rate or 0)
+                line_tax=round(line_total*rate/100,2)
+                if tax_type=='GST': gst_tax+=line_tax
+                else: cst_tax+=line_tax
+                line_data.append((product,qty,line_total,line_tax,rate))
             if not line_data: raise ValueError('Add at least one product.')
             if discount>subtotal: raise ValueError('Discount cannot exceed subtotal.')
-            total=subtotal-discount
+            base_after_discount=subtotal-discount
+            # Allocate discount proportionally before tax, by applying the transaction discount to the aggregate tax base.
+            tax_total=round((gst_tax if tax_type=='GST' else cst_tax) * (base_after_discount/subtotal if subtotal else 0),2)
+            if tax_type=='GST':
+                if supply_type=='Local': cgst=round(tax_total/2,2); sgst=round(tax_total-cgst,2); igst=0.0
+                else: igst=tax_total; cgst=sgst=0.0
+                cst=0.0
+            else: cst=tax_total; cgst=sgst=igst=0.0
+            total=round(base_after_discount+tax_total,2)
             invoice='SM'+datetime.now().strftime('%y%m%d%H%M%S')+str(session['user_id'])
-            sale=Sale(supermarket_id=sid,invoice_no=invoice,customer_name=request.form.get('customer_name','').strip() or 'Walk-in customer',payment_method=request.form.get('payment_method','Cash'),subtotal=subtotal,discount=discount,total=total,paid=min(paid,total))
+            sale=Sale(supermarket_id=sid,invoice_no=invoice,customer_name=request.form.get('customer_name','').strip() or 'Walk-in customer',payment_method=request.form.get('payment_method','Cash'),subtotal=subtotal,discount=discount,total=total,paid=min(paid,total),tax_type=tax_type,supply_type=supply_type,cgst=cgst,sgst=sgst,igst=igst,cst=cst,tax_amount=tax_total)
             db.session.add(sale); db.session.flush()
-            for product,qty,line_total in line_data:
+            for product,qty,line_total,line_tax,line_rate in line_data:
                 db.session.add(SaleItem(sale_id=sale.id,product_id=product.id,product_name=product.name,quantity=qty,unit_price=product.selling_price,cost_price=product.cost_price,line_total=line_total))
                 product.stock_qty-=qty
             db.session.commit(); return redirect(url_for('sale_receipt',sale_id=sale.id))
@@ -548,6 +600,53 @@ def export_reports():
             sheet.column_dimensions[get_column_letter(col[0].column)].width=width
     output=BytesIO(); wb.save(output); output.seek(0)
     return send_file(output,as_attachment=True,download_name=f'supermart_report_{start}_{end}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+@app.route('/tax-report')
+@login_required
+def tax_report():
+    start,end=date_range(); sid=store_id()
+    sales=Sale.query.filter(Sale.supermarket_id==sid,func.date(Sale.sale_date)>=start.isoformat(),func.date(Sale.sale_date)<=end.isoformat()).all()
+    purchases=Purchase.query.filter(Purchase.supermarket_id==sid,Purchase.purchase_date>=start,Purchase.purchase_date<=end).all()
+    sales_returns=SalesReturn.query.filter(SalesReturn.supermarket_id==sid,SalesReturn.return_date>=start,SalesReturn.return_date<=end).all()
+    purchase_returns=PurchaseReturn.query.filter(PurchaseReturn.supermarket_id==sid,PurchaseReturn.return_date>=start,PurchaseReturn.return_date<=end).all()
+    # Return tax is estimated proportionally from the source transaction's effective tax rate.
+    out={k:0.0 for k in ('sales_cgst','sales_sgst','sales_igst','sales_cst','purchase_cgst','purchase_sgst','purchase_igst','purchase_cst','sales_return_tax','purchase_return_tax')}
+    for x in sales: out['sales_cgst']+=x.cgst or 0; out['sales_sgst']+=x.sgst or 0; out['sales_igst']+=x.igst or 0; out['sales_cst']+=x.cst or 0
+    for x in purchases: out['purchase_cgst']+=x.cgst or 0; out['purchase_sgst']+=x.sgst or 0; out['purchase_igst']+=x.igst or 0; out['purchase_cst']+=x.cst or 0
+    for r in sales_returns:
+        src=r.sale; denom=max(0.01,src.subtotal-(src.discount or 0)); out['sales_return_tax'] += (src.tax_amount or 0)*(r.amount/denom)
+    for r in purchase_returns:
+        src=r.purchase; denom=max(0.01,src.base_total or src.total); out['purchase_return_tax'] += (src.tax_amount or 0)*(r.amount/denom)
+    out={k:round(v,2) for k,v in out.items()}
+    sales_gst=out['sales_cgst']+out['sales_sgst']+out['sales_igst']; purchase_gst=out['purchase_cgst']+out['purchase_sgst']+out['purchase_igst']
+    net_gst=round(sales_gst-out['sales_return_tax']-purchase_gst+out['purchase_return_tax'],2)
+    net_cst=round(out['sales_cst']-out['purchase_cst'],2)
+    return render_template('tax_report.html',start=start.isoformat(),end=end.isoformat(),sales=sales,purchases=purchases,out=out,sales_gst=round(sales_gst,2),purchase_gst=round(purchase_gst,2),net_gst=net_gst,net_cst=net_cst,sales_returns=sales_returns,purchase_returns=purchase_returns)
+
+@app.route('/tax-report/export.xlsx')
+@login_required
+def tax_report_export():
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    start,end=date_range(); sid=store_id(); wb=Workbook(); ws=wb.active; ws.title='Tax Summary'
+    ws.append(['Tax submission summary',session.get('store_name','SuperMart')]); ws.append(['Period',f'{start} to {end}'])
+    sales=Sale.query.filter(Sale.supermarket_id==sid,func.date(Sale.sale_date)>=start.isoformat(),func.date(Sale.sale_date)<=end.isoformat()).all(); purchases=Purchase.query.filter(Purchase.supermarket_id==sid,Purchase.purchase_date>=start,Purchase.purchase_date<=end).all()
+    sales_returns=SalesReturn.query.filter(SalesReturn.supermarket_id==sid,SalesReturn.return_date>=start,SalesReturn.return_date<=end).all()
+    purchase_returns=PurchaseReturn.query.filter(PurchaseReturn.supermarket_id==sid,PurchaseReturn.return_date>=start,PurchaseReturn.return_date<=end).all()
+    sales_return_tax=sum((r.sale.tax_amount or 0)*(r.amount/max(0.01,r.sale.subtotal-(r.sale.discount or 0))) for r in sales_returns)
+    purchase_return_tax=sum((r.purchase.tax_amount or 0)*(r.amount/max(0.01,r.purchase.base_total or r.purchase.total)) for r in purchase_returns)
+    output_gst=sum((x.cgst or 0)+(x.sgst or 0)+(x.igst or 0) for x in sales)
+    input_gst=sum((x.cgst or 0)+(x.sgst or 0)+(x.igst or 0) for x in purchases)
+    for label,value in [('Sales taxable value (before tax)',sum(max(0,s.subtotal-(s.discount or 0)) for s in sales)),('Output CGST',sum(s.cgst or 0 for s in sales)),('Output SGST',sum(s.sgst or 0 for s in sales)),('Output IGST',sum(s.igst or 0 for s in sales)),('Output CST (legacy)',sum(s.cst or 0 for s in sales)),('Purchase taxable value (before tax)',sum(p.base_total or p.total for p in purchases)),('Input CGST',sum(p.cgst or 0 for p in purchases)),('Input SGST',sum(p.sgst or 0 for p in purchases)),('Input IGST',sum(p.igst or 0 for p in purchases)),('Input CST (legacy)',sum(p.cst or 0 for p in purchases)),('Estimated tax reduction from sales returns',sales_return_tax),('Estimated input tax reduction from purchase returns',purchase_return_tax),('Estimated net GST after returns',output_gst-sales_return_tax-input_gst+purchase_return_tax)]: ws.append([label,round(value,2)])
+    detail=wb.create_sheet('Sales invoices'); detail.append(['Invoice','Date','Customer','Tax type','Supply type','Taxable value','CGST','SGST','IGST','CST','Tax','Invoice total'])
+    for x in sales: detail.append([x.invoice_no,x.sale_date.isoformat(),x.customer_name,x.tax_type,x.supply_type,round(x.subtotal-(x.discount or 0),2),x.cgst,x.sgst,x.igst,x.cst,x.tax_amount,x.total])
+    detail=wb.create_sheet('Purchase invoices'); detail.append(['Date','Supplier','Product','Tax type','Supply type','Taxable value','CGST','SGST','IGST','CST','Tax','Invoice total'])
+    for x in purchases: detail.append([x.purchase_date.isoformat(),x.supplier,x.product.name,x.tax_type,x.supply_type,x.base_total,x.cgst,x.sgst,x.igst,x.cst,x.tax_amount,x.total])
+    for sh in wb.worksheets:
+        sh.freeze_panes='A2'; sh.auto_filter.ref=sh.dimensions
+        for c in sh[1]: c.font=Font(bold=True,color='FFFFFF'); c.fill=PatternFill('solid',fgColor='203B53')
+        for col in sh.columns: sh.column_dimensions[col[0].column_letter].width=min(max(max(len(str(c.value or '')) for c in col)+2,12),32)
+    output=BytesIO(); wb.save(output); output.seek(0); return send_file(output,as_attachment=True,download_name=f'tax_submission_{start}_{end}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 @app.route('/accounting')
 @login_required
