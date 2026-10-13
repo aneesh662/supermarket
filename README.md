@@ -15,6 +15,9 @@ A small Flask application for managing multiple independent supermarkets using a
 - Record partial or full customer collections against an invoice and supplier payments against a purchase, with printable receipt/payment voucher and payment history.
 - Global system administrator console to create supermarkets and owner logins, view each store’s sales/AR/AP totals, rename stores, open a store workspace, and manage module permissions for each store user.
 - Outstanding AR/AP lists show every unpaid invoice/bill regardless of age; date filters apply to the payment-history table.
+- Sales returns and purchase returns with return quantity limits, return history, automatic stock adjustment, and return value deductions from outstanding customer/supplier balances.
+- Aged receivables and aged payables report with Current, 1–30, 31–60, 61–90 and over-90-day buckets, print support, and Excel export.
+- Responsive layout refinements for mobile phones, tablets, laptops and desktop screens.
 
 ## Run on your computer
 Requires Python 3.10 or newer. No separate database installation is needed. SQLite is included with Python.
@@ -62,3 +65,12 @@ The global administrator can view all registered supermarkets, open a store work
 ## Accounts receivable and payable settlements
 
 In Receivables & Payables, use **Receive payment** against an outstanding customer invoice or **Pay supplier** against a supplier purchase. Enter the amount, date, method, and optional reference. The amount updates the invoice balance, is logged in payment history, and opens a printable receipt/voucher. Partial payments are supported; a payment cannot exceed the outstanding balance.
+
+
+## Sales and purchase returns
+Open **Sales / Purchase Returns** in the navigation. Select an original sale line or purchase, enter a quantity, date and reason, then save. Sales returns increase stock; purchase returns decrease stock (a purchase return cannot exceed the current available stock). The return amount is calculated from the original sale price or purchase cost. Returned quantities cannot exceed the original quantity. Return credits reduce outstanding AR/AP balances and appear in the ageing report.
+
+**Accounting note:** This version applies return value against outstanding balances. If a customer invoice is already fully paid, a sales return does not automatically issue a cash refund or create a separate customer-credit ledger. Likewise, a purchase return on a fully paid supplier bill does not automatically create a supplier refund/credit note. Track those separately until a dedicated refund/credit-note workflow is added.
+
+## Ageing report
+Open **Aged AR / AP**. Outstanding balances are grouped by age from the original sale or purchase date into Current, 1–30, 31–60, 61–90 and over 90 days. The app currently does not store contractual invoice due dates, so ageing is based on invoice date, not the due date. Print from the page or export both reports to Excel.

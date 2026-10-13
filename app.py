@@ -102,6 +102,34 @@ class PaymentTransaction(db.Model):
     sale = db.relationship('Sale')
     purchase = db.relationship('Purchase')
 
+class SalesReturn(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    supermarket_id = db.Column(db.Integer, db.ForeignKey('supermarket.id'), nullable=False, index=True)
+    sale_id = db.Column(db.Integer, db.ForeignKey('sale.id'), nullable=False, index=True)
+    sale_item_id = db.Column(db.Integer, db.ForeignKey('sale_item.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
+    quantity = db.Column(db.Float, nullable=False)
+    unit_price = db.Column(db.Float, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    return_date = db.Column(db.Date, default=date.today, nullable=False, index=True)
+    reason = db.Column(db.String(250), default='')
+    sale = db.relationship('Sale')
+    sale_item = db.relationship('SaleItem')
+    product = db.relationship('Product')
+
+class PurchaseReturn(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    supermarket_id = db.Column(db.Integer, db.ForeignKey('supermarket.id'), nullable=False, index=True)
+    purchase_id = db.Column(db.Integer, db.ForeignKey('purchase.id'), nullable=False, index=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
+    quantity = db.Column(db.Float, nullable=False)
+    unit_cost = db.Column(db.Float, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    return_date = db.Column(db.Date, default=date.today, nullable=False, index=True)
+    reason = db.Column(db.String(250), default='')
+    purchase = db.relationship('Purchase')
+    product = db.relationship('Product')
+
 class Expense(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     supermarket_id = db.Column(db.Integer, db.ForeignKey('supermarket.id'), nullable=False, index=True)
@@ -145,7 +173,7 @@ with app.app_context():
 def store_id():
     return session.get('active_store_id') or session.get('supermarket_id')
 
-PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables'}
+PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables', 'returns':'purchases', 'sales_return':'sales', 'purchase_return':'purchases', 'aging_report':'reports', 'export_aging_report':'reports'}
 
 def login_required(fn):
     @wraps(fn)
@@ -443,7 +471,7 @@ def reports():
     purchase_rows=Purchase.query.filter(Purchase.supermarket_id==sid,Purchase.purchase_date>=start,Purchase.purchase_date<=end).order_by(Purchase.purchase_date.desc()).all()
     expense_rows=Expense.query.filter(Expense.supermarket_id==sid,Expense.expense_date>=start,Expense.expense_date<=end).order_by(Expense.expense_date.desc()).all()
     cogs=sum(item.quantity*item.cost_price for sale in sales_rows for item in sale.items)
-    sales_total=sum(s.total for s in sales_rows); purchase_total=sum(p.total for p in purchase_rows); expense_total=sum(e.amount for e in expense_rows)
+    sales_total=sum(s.total for s in sales_rows)-sum((db.session.query(func.coalesce(func.sum(SalesReturn.amount),0)).filter_by(sale_id=s.id,supermarket_id=sid).scalar() or 0) for s in sales_rows); purchase_total=sum(p.total for p in purchase_rows)-sum((db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(purchase_id=p.id,supermarket_id=sid).scalar() or 0) for p in purchase_rows); expense_total=sum(e.amount for e in expense_rows)
     return render_template('reports.html',start=start.isoformat(),end=end.isoformat(),sales=sales_rows,purchases=purchase_rows,expenses=expense_rows,sales_total=sales_total,purchase_total=purchase_total,expense_total=expense_total,cogs=cogs,gross_profit=sales_total-cogs,net_estimate=sales_total-cogs-expense_total)
 
 @app.route('/reports/export.xlsx')
@@ -457,7 +485,7 @@ def export_reports():
     sales_rows=Sale.query.filter(Sale.supermarket_id==sid,func.date(Sale.sale_date)>=start.isoformat(),func.date(Sale.sale_date)<=end.isoformat()).all()
     purchase_rows=Purchase.query.filter(Purchase.supermarket_id==sid,Purchase.purchase_date>=start,Purchase.purchase_date<=end).all()
     expense_rows=Expense.query.filter(Expense.supermarket_id==sid,Expense.expense_date>=start,Expense.expense_date<=end).all()
-    sales_total=sum(s.total for s in sales_rows); purchase_total=sum(p.total for p in purchase_rows); expense_total=sum(e.amount for e in expense_rows)
+    sales_total=sum(s.total for s in sales_rows)-sum((db.session.query(func.coalesce(func.sum(SalesReturn.amount),0)).filter_by(sale_id=s.id,supermarket_id=sid).scalar() or 0) for s in sales_rows); purchase_total=sum(p.total for p in purchase_rows)-sum((db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(purchase_id=p.id,supermarket_id=sid).scalar() or 0) for p in purchase_rows); expense_total=sum(e.amount for e in expense_rows)
     cogs=sum(i.quantity*i.cost_price for s in sales_rows for i in s.items)
     for row in [['Sales',sales_total],['Purchases',purchase_total],['Other expenses',expense_total],['Cost of goods sold (estimated)',cogs],['Gross profit (estimated)',sales_total-cogs],['Net estimate after expenses',sales_total-cogs-expense_total]]: ws.append(row)
     ws2=wb.create_sheet('Sales'); ws2.append(['Invoice','Date','Customer','Payment','Subtotal','Discount','Total','Paid'])
@@ -482,7 +510,7 @@ def accounting():
     ss=Sale.query.filter(Sale.supermarket_id==sid,func.date(Sale.sale_date)>=start.isoformat(),func.date(Sale.sale_date)<=end.isoformat()).all()
     ps=Purchase.query.filter(Purchase.supermarket_id==sid,Purchase.purchase_date>=start,Purchase.purchase_date<=end).all()
     es=Expense.query.filter(Expense.supermarket_id==sid,Expense.expense_date>=start,Expense.expense_date<=end).all()
-    sales_total=sum(s.total for s in ss); cogs=sum(i.quantity*i.cost_price for s in ss for i in s.items); purchase_total=sum(p.total for p in ps); expense_total=sum(e.amount for e in es)
+    sales_total=sum(s.total for s in ss)-sum((db.session.query(func.coalesce(func.sum(SalesReturn.amount),0)).filter_by(sale_id=s.id,supermarket_id=sid).scalar() or 0) for s in ss); cogs=sum(i.quantity*i.cost_price for s in ss for i in s.items); purchase_total=sum(p.total for p in ps)-sum((db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(purchase_id=p.id,supermarket_id=sid).scalar() or 0) for p in ps); expense_total=sum(e.amount for e in es)
     return render_template('accounting.html',start=start.isoformat(),end=end.isoformat(),sales_total=sales_total,purchase_total=purchase_total,expense_total=expense_total,cogs=cogs,gross_profit=sales_total-cogs,net_estimate=sales_total-cogs-expense_total)
 
 
@@ -494,11 +522,15 @@ def receivables_payables():
     # Outstanding balances are shown across ALL dates so old unpaid invoices are never hidden.
     sales_rows = Sale.query.filter(Sale.supermarket_id == sid).order_by(Sale.sale_date.desc()).all()
     purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid).order_by(Purchase.purchase_date.desc()).all()
-    receivables = [sale for sale in sales_rows if sale.total - (sale.paid or 0) > 0.009]
-    payables = [purchase for purchase in purchase_rows if purchase.total - (purchase.paid or 0) > 0.009]
+    for sale in sales_rows:
+        sale.return_total = db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0)).filter_by(sale_id=sale.id, supermarket_id=sid).scalar() or 0
+    for purchase in purchase_rows:
+        purchase.return_total = db.session.query(func.coalesce(func.sum(PurchaseReturn.amount), 0)).filter_by(purchase_id=purchase.id, supermarket_id=sid).scalar() or 0
+    receivables = [sale for sale in sales_rows if sale.total - (sale.paid or 0) - sale.return_total > 0.009]
+    payables = [purchase for purchase in purchase_rows if purchase.total - (purchase.paid or 0) - purchase.return_total > 0.009]
     transactions = PaymentTransaction.query.filter_by(supermarket_id=sid).filter(PaymentTransaction.payment_date >= start, PaymentTransaction.payment_date <= end).order_by(PaymentTransaction.payment_date.desc(), PaymentTransaction.id.desc()).all()
     return render_template('receivables_payables.html', start=start.isoformat(), end=end.isoformat(), receivables=receivables, payables=payables, transactions=transactions,
-        receivable_total=sum(s.total - (s.paid or 0) for s in receivables), payable_total=sum(p.total - (p.paid or 0) for p in payables))
+        receivable_total=sum(max(0, s.total - (s.paid or 0) - s.return_total) for s in receivables), payable_total=sum(max(0, p.total - (p.paid or 0) - p.return_total) for p in payables))
 
 @app.route('/receivables-payables/export.xlsx')
 @login_required
@@ -508,17 +540,19 @@ def export_receivables_payables():
     from openpyxl.utils import get_column_letter
     sid = store_id(); start, end = date_range(); wb = Workbook()
     ar = wb.active; ar.title = 'Accounts Receivable'
-    ar.append(['Invoice', 'Date', 'Customer', 'Payment method', 'Invoice total', 'Amount received', 'Outstanding'])
+    ar.append(['Invoice', 'Date', 'Customer', 'Payment method', 'Invoice total', 'Amount received', 'Returns / credit', 'Outstanding'])
     sales_rows = Sale.query.filter(Sale.supermarket_id == sid).order_by(Sale.sale_date.desc()).all()
     for sale in sales_rows:
-        due = round(sale.total - (sale.paid or 0), 2)
-        if due > 0.009: ar.append([sale.invoice_no, sale.sale_date.strftime('%Y-%m-%d %H:%M'), sale.customer_name, sale.payment_method, sale.total, sale.paid or 0, due])
+        returned = db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0)).filter_by(sale_id=sale.id, supermarket_id=sid).scalar() or 0
+        due = round(max(0, sale.total - (sale.paid or 0) - returned), 2)
+        if due > 0.009: ar.append([sale.invoice_no, sale.sale_date.strftime('%Y-%m-%d %H:%M'), sale.customer_name, sale.payment_method, sale.total, sale.paid or 0, returned, due])
     ap = wb.create_sheet('Accounts Payable')
-    ap.append(['Date', 'Supplier', 'Product', 'Payment method', 'Purchase total', 'Amount paid', 'Outstanding'])
+    ap.append(['Date', 'Supplier', 'Product', 'Payment method', 'Purchase total', 'Amount paid', 'Returns / credit', 'Outstanding'])
     purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid).order_by(Purchase.purchase_date.desc()).all()
     for purchase in purchase_rows:
-        due = round(purchase.total - (purchase.paid or 0), 2)
-        if due > 0.009: ap.append([purchase.purchase_date.isoformat(), purchase.supplier, purchase.product.name, purchase.payment_method, purchase.total, purchase.paid or 0, due])
+        returned = db.session.query(func.coalesce(func.sum(PurchaseReturn.amount), 0)).filter_by(purchase_id=purchase.id, supermarket_id=sid).scalar() or 0
+        due = round(max(0, purchase.total - (purchase.paid or 0) - returned), 2)
+        if due > 0.009: ap.append([purchase.purchase_date.isoformat(), purchase.supplier, purchase.product.name, purchase.payment_method, purchase.total, purchase.paid or 0, returned, due])
     for sheet in wb.worksheets:
         sheet.freeze_panes = 'A2'; sheet.auto_filter.ref = sheet.dimensions
         for cell in sheet[1]: cell.font = Font(bold=True, color='FFFFFF'); cell.fill = PatternFill('solid', fgColor='203B53')
@@ -535,7 +569,7 @@ def receive_customer_payment():
     try:
         sale = Sale.query.filter_by(id=int(request.form['sale_id']), supermarket_id=sid).first_or_404()
         amount = round(float(request.form.get('amount', 0)), 2)
-        if amount <= 0 or amount > round(sale.total - (sale.paid or 0), 2) + 0.001:
+        if amount <= 0 or amount > round(sale.total - (sale.paid or 0) - (db.session.query(func.coalesce(func.sum(SalesReturn.amount), 0)).filter_by(sale_id=sale.id, supermarket_id=sid).scalar() or 0), 2) + 0.001:
             raise ValueError('Enter an amount greater than zero and no more than the outstanding balance.')
         method = request.form.get('payment_method', 'Cash')
         pdate = datetime.strptime(request.form.get('payment_date') or date.today().isoformat(), '%Y-%m-%d').date()
@@ -553,7 +587,7 @@ def pay_supplier():
     try:
         purchase = Purchase.query.filter_by(id=int(request.form['purchase_id']), supermarket_id=sid).first_or_404()
         amount = round(float(request.form.get('amount', 0)), 2)
-        if amount <= 0 or amount > round(purchase.total - (purchase.paid or 0), 2) + 0.001:
+        if amount <= 0 or amount > round(purchase.total - (purchase.paid or 0) - (db.session.query(func.coalesce(func.sum(PurchaseReturn.amount), 0)).filter_by(purchase_id=purchase.id, supermarket_id=sid).scalar() or 0), 2) + 0.001:
             raise ValueError('Enter an amount greater than zero and no more than the outstanding balance.')
         method = request.form.get('payment_method', 'Cash')
         pdate = datetime.strptime(request.form.get('payment_date') or date.today().isoformat(), '%Y-%m-%d').date()
@@ -569,6 +603,110 @@ def pay_supplier():
 def payment_receipt(payment_id):
     payment = PaymentTransaction.query.filter_by(id=payment_id, supermarket_id=store_id()).first_or_404()
     return render_template('payment_receipt.html', payment=payment)
+
+
+@app.route('/returns', methods=['GET'])
+@login_required
+def returns():
+    sid = store_id()
+    sales_rows = Sale.query.filter_by(supermarket_id=sid).order_by(Sale.sale_date.desc()).limit(250).all()
+    purchase_rows = Purchase.query.filter_by(supermarket_id=sid).order_by(Purchase.purchase_date.desc(), Purchase.id.desc()).limit(250).all()
+    sale_items = SaleItem.query.join(Sale, SaleItem.sale_id == Sale.id).filter(Sale.supermarket_id == sid).order_by(Sale.sale_date.desc()).limit(500).all()
+    sr = SalesReturn.query.filter_by(supermarket_id=sid).order_by(SalesReturn.return_date.desc(), SalesReturn.id.desc()).limit(100).all()
+    pr = PurchaseReturn.query.filter_by(supermarket_id=sid).order_by(PurchaseReturn.return_date.desc(), PurchaseReturn.id.desc()).limit(100).all()
+    sale_returned_qty = {i.id: (db.session.query(func.coalesce(func.sum(SalesReturn.quantity),0)).filter_by(sale_item_id=i.id, supermarket_id=sid).scalar() or 0) for i in sale_items}
+    purchase_returned_qty = {i.id: (db.session.query(func.coalesce(func.sum(PurchaseReturn.quantity),0)).filter_by(purchase_id=i.id, supermarket_id=sid).scalar() or 0) for i in purchase_rows}
+    return render_template('returns.html', sales=sales_rows, purchases=purchase_rows, sale_items=sale_items, sales_returns=sr, purchase_returns=pr, sale_returned_qty=sale_returned_qty, purchase_returned_qty=purchase_returned_qty)
+
+@app.route('/returns/sales', methods=['POST'])
+@login_required
+def sales_return():
+    sid = store_id()
+    try:
+        item = SaleItem.query.join(Sale, SaleItem.sale_id == Sale.id).filter(SaleItem.id == int(request.form['sale_item_id']), Sale.supermarket_id == sid).first_or_404()
+        already = db.session.query(func.coalesce(func.sum(SalesReturn.quantity),0)).filter_by(sale_item_id=item.id, supermarket_id=sid).scalar() or 0
+        qty = float(request.form.get('quantity', 0))
+        if qty <= 0 or qty > item.quantity - already + 0.0001: raise ValueError(f'Return quantity must be above zero and no more than {item.quantity-already:g}.')
+        product = db.session.get(Product, item.product_id)
+        if not product or product.supermarket_id != sid: raise ValueError('Product not found in this store.')
+        rdate = datetime.strptime(request.form.get('return_date') or date.today().isoformat(), '%Y-%m-%d').date()
+        amount = round(qty * item.unit_price, 2)
+        record = SalesReturn(supermarket_id=sid, sale_id=item.sale_id, sale_item_id=item.id, product_id=item.product_id, quantity=qty, unit_price=item.unit_price, amount=amount, return_date=rdate, reason=request.form.get('reason','').strip())
+        product.stock_qty += qty
+        db.session.add(record); db.session.commit()
+        flash(f'Sales return saved ({money(amount)}). Stock increased. Any unpaid customer balance is reduced by the return value.', 'success')
+    except (ValueError, KeyError) as exc:
+        db.session.rollback(); flash(str(exc) or 'Invalid sales return.', 'error')
+    return redirect(url_for('returns'))
+
+@app.route('/returns/purchases', methods=['POST'])
+@login_required
+def purchase_return():
+    sid = store_id()
+    try:
+        purchase = Purchase.query.filter_by(id=int(request.form['purchase_id']), supermarket_id=sid).first_or_404()
+        already = db.session.query(func.coalesce(func.sum(PurchaseReturn.quantity),0)).filter_by(purchase_id=purchase.id, supermarket_id=sid).scalar() or 0
+        qty = float(request.form.get('quantity', 0))
+        if qty <= 0 or qty > purchase.quantity - already + 0.0001: raise ValueError(f'Return quantity must be above zero and no more than {purchase.quantity-already:g}.')
+        product = db.session.get(Product, purchase.product_id)
+        if not product or product.supermarket_id != sid: raise ValueError('Product not found in this store.')
+        if qty > product.stock_qty + 0.0001: raise ValueError(f'Cannot return {qty:g}; current stock is only {product.stock_qty:g}.')
+        rdate = datetime.strptime(request.form.get('return_date') or date.today().isoformat(), '%Y-%m-%d').date()
+        amount = round(qty * purchase.unit_cost, 2)
+        record = PurchaseReturn(supermarket_id=sid, purchase_id=purchase.id, product_id=purchase.product_id, quantity=qty, unit_cost=purchase.unit_cost, amount=amount, return_date=rdate, reason=request.form.get('reason','').strip())
+        product.stock_qty -= qty
+        db.session.add(record); db.session.commit()
+        flash(f'Purchase return saved ({money(amount)}). Stock reduced. Any unpaid supplier balance is reduced by the return value.', 'success')
+    except (ValueError, KeyError) as exc:
+        db.session.rollback(); flash(str(exc) or 'Invalid purchase return.', 'error')
+    return redirect(url_for('returns'))
+
+@app.route('/reports/aging')
+@login_required
+def aging_report():
+    sid = store_id(); today = date.today()
+    sales = Sale.query.filter_by(supermarket_id=sid).all()
+    purchases = Purchase.query.filter_by(supermarket_id=sid).all()
+    ar_rows=[]; ap_rows=[]
+    def buckets(age, due):
+        return [due if age <= 0 else 0, due if 1 <= age <= 30 else 0, due if 31 <= age <= 60 else 0, due if 61 <= age <= 90 else 0, due if age > 90 else 0]
+    for sale in sales:
+        returned = db.session.query(func.coalesce(func.sum(SalesReturn.amount),0)).filter_by(sale_id=sale.id, supermarket_id=sid).scalar() or 0
+        due = round(max(0, sale.total - (sale.paid or 0) - returned),2)
+        if due > .009:
+            age=(today-sale.sale_date.date()).days; ar_rows.append({'ref':sale.invoice_no,'date':sale.sale_date.date(),'party':sale.customer_name,'total':sale.total,'paid':sale.paid or 0,'returns':returned,'due':due,'age':age,'buckets':buckets(age,due)})
+    for purchase in purchases:
+        returned = db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(purchase_id=purchase.id, supermarket_id=sid).scalar() or 0
+        due=round(max(0,purchase.total-(purchase.paid or 0)-returned),2)
+        if due > .009:
+            age=(today-purchase.purchase_date).days; ap_rows.append({'ref':f'PUR-{purchase.id}','date':purchase.purchase_date,'party':purchase.supplier or 'Supplier not specified','total':purchase.total,'paid':purchase.paid or 0,'returns':returned,'due':due,'age':age,'buckets':buckets(age,due)})
+    return render_template('aging_report.html', ar_rows=sorted(ar_rows,key=lambda x:x['age'],reverse=True), ap_rows=sorted(ap_rows,key=lambda x:x['age'],reverse=True), today=today,
+        ar_totals=[sum(r['buckets'][i] for r in ar_rows) for i in range(5)], ap_totals=[sum(r['buckets'][i] for r in ap_rows) for i in range(5)])
+
+@app.route('/reports/aging/export.xlsx')
+@login_required
+def export_aging_report():
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    sid=store_id(); today=date.today(); wb=Workbook();
+    for title, records, is_ar in [('Aged Receivables', Sale.query.filter_by(supermarket_id=sid).all(), True), ('Aged Payables', Purchase.query.filter_by(supermarket_id=sid).all(), False)]:
+        ws=wb.active if title=='Aged Receivables' else wb.create_sheet()
+        ws.title=title
+        ws.append(['Invoice / Reference','Invoice Date','Customer / Supplier','Total','Paid','Returns','Outstanding','Age (days)','Current','1-30 days','31-60 days','61-90 days','Over 90 days'])
+        for obj in records:
+            if is_ar:
+                returned=db.session.query(func.coalesce(func.sum(SalesReturn.amount),0)).filter_by(sale_id=obj.id,supermarket_id=sid).scalar() or 0; due=max(0,obj.total-(obj.paid or 0)-returned); dt=obj.sale_date.date(); ref=obj.invoice_no; party=obj.customer_name
+            else:
+                returned=db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(purchase_id=obj.id,supermarket_id=sid).scalar() or 0; due=max(0,obj.total-(obj.paid or 0)-returned); dt=obj.purchase_date; ref=f'PUR-{obj.id}'; party=obj.supplier or 'Supplier not specified'
+            if due <= .009: continue
+            age=(today-dt).days; b=[due if age<=0 else 0,due if 1<=age<=30 else 0,due if 31<=age<=60 else 0,due if 61<=age<=90 else 0,due if age>90 else 0]
+            ws.append([ref,dt.isoformat(),party,obj.total,obj.paid or 0,returned,round(due,2),age,*b])
+        ws.freeze_panes='A2'; ws.auto_filter.ref=ws.dimensions
+        for cell in ws[1]: cell.font=Font(bold=True,color='FFFFFF'); cell.fill=PatternFill('solid',fgColor='203B53')
+        for col in ws.columns: ws.column_dimensions[get_column_letter(col[0].column)].width=min(max(max(len(str(c.value or '')) for c in col)+2,12),30)
+    out=BytesIO(); wb.save(out); out.seek(0)
+    return send_file(out,as_attachment=True,download_name=f'supermart_aging_{today.isoformat()}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 @app.route('/health')
 def health(): return {'status':'ok'}
