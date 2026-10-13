@@ -56,6 +56,8 @@ class Purchase(db.Model):
     total = db.Column(db.Float, nullable=False)
     purchase_date = db.Column(db.Date, default=date.today, index=True)
     note = db.Column(db.String(250), default='')
+    paid = db.Column(db.Float, default=0, nullable=False)
+    payment_method = db.Column(db.String(30), default='Credit', nullable=False)
     product = db.relationship('Product')
 
 class Sale(db.Model):
@@ -94,6 +96,15 @@ class Expense(db.Model):
 
 with app.app_context():
     db.create_all()
+    # Lightweight SQLite schema migration for existing installations.
+    from sqlalchemy import inspect
+    inspector = inspect(db.engine)
+    purchase_columns = {column['name'] for column in inspector.get_columns('purchase')}
+    with db.engine.begin() as connection:
+        if 'paid' not in purchase_columns:
+            connection.exec_driver_sql('ALTER TABLE purchase ADD COLUMN paid FLOAT NOT NULL DEFAULT 0')
+        if 'payment_method' not in purchase_columns:
+            connection.exec_driver_sql("ALTER TABLE purchase ADD COLUMN payment_method VARCHAR(30) NOT NULL DEFAULT 'Credit'")
 
 def store_id():
     return session.get('supermarket_id')
@@ -215,7 +226,7 @@ def purchases():
             if qty<=0 or cost<0: raise ValueError()
             pdate=datetime.strptime(request.form.get('purchase_date') or date.today().isoformat(),'%Y-%m-%d').date()
             total=qty*cost
-            db.session.add(Purchase(supermarket_id=sid,product_id=product.id,supplier=request.form.get('supplier','').strip(),quantity=qty,unit_cost=cost,total=total,purchase_date=pdate,note=request.form.get('note','').strip()))
+            db.session.add(Purchase(supermarket_id=sid,product_id=product.id,supplier=request.form.get('supplier','').strip(),quantity=qty,unit_cost=cost,total=total,purchase_date=pdate,note=request.form.get('note','').strip(),paid=min(max(float(request.form.get('paid',0)),0),total),payment_method=request.form.get('payment_method','Credit')))
             product.stock_qty += qty; product.cost_price=cost
             db.session.commit(); flash('Purchase saved and stock updated.', 'success')
         except (ValueError, KeyError):
@@ -315,8 +326,8 @@ def export_reports():
     for row in [['Sales',sales_total],['Purchases',purchase_total],['Other expenses',expense_total],['Cost of goods sold (estimated)',cogs],['Gross profit (estimated)',sales_total-cogs],['Net estimate after expenses',sales_total-cogs-expense_total]]: ws.append(row)
     ws2=wb.create_sheet('Sales'); ws2.append(['Invoice','Date','Customer','Payment','Subtotal','Discount','Total','Paid'])
     for s in sales_rows: ws2.append([s.invoice_no,s.sale_date.strftime('%Y-%m-%d %H:%M'),s.customer_name,s.payment_method,s.subtotal,s.discount,s.total,s.paid])
-    ws3=wb.create_sheet('Purchases'); ws3.append(['Date','Product','Supplier','Quantity','Unit cost','Total','Note'])
-    for p in purchase_rows: ws3.append([p.purchase_date.isoformat(),p.product.name,p.supplier,p.quantity,p.unit_cost,p.total,p.note])
+    ws3=wb.create_sheet('Purchases'); ws3.append(['Date','Product','Supplier','Quantity','Unit cost','Total','Paid','Outstanding','Payment method','Note'])
+    for p in purchase_rows: ws3.append([p.purchase_date.isoformat(),p.product.name,p.supplier,p.quantity,p.unit_cost,p.total,p.paid or 0,max(0,p.total-(p.paid or 0)),p.payment_method,p.note])
     ws4=wb.create_sheet('Expenses'); ws4.append(['Date','Category','Description','Payment','Amount'])
     for e in expense_rows: ws4.append([e.expense_date.isoformat(),e.category,e.description,e.payment_method,e.amount])
     for sheet in wb.worksheets:
@@ -337,6 +348,47 @@ def accounting():
     es=Expense.query.filter(Expense.supermarket_id==sid,Expense.expense_date>=start,Expense.expense_date<=end).all()
     sales_total=sum(s.total for s in ss); cogs=sum(i.quantity*i.cost_price for s in ss for i in s.items); purchase_total=sum(p.total for p in ps); expense_total=sum(e.amount for e in es)
     return render_template('accounting.html',start=start.isoformat(),end=end.isoformat(),sales_total=sales_total,purchase_total=purchase_total,expense_total=expense_total,cogs=cogs,gross_profit=sales_total-cogs,net_estimate=sales_total-cogs-expense_total)
+
+
+@app.route('/receivables-payables')
+@login_required
+def receivables_payables():
+    sid = store_id()
+    start, end = date_range()
+    sales_rows = Sale.query.filter(Sale.supermarket_id == sid, func.date(Sale.sale_date) >= start.isoformat(), func.date(Sale.sale_date) <= end.isoformat()).order_by(Sale.sale_date.desc()).all()
+    purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid, Purchase.purchase_date >= start, Purchase.purchase_date <= end).order_by(Purchase.purchase_date.desc()).all()
+    receivables = [sale for sale in sales_rows if sale.total - (sale.paid or 0) > 0.009]
+    payables = [purchase for purchase in purchase_rows if purchase.total - (purchase.paid or 0) > 0.009]
+    return render_template('receivables_payables.html', start=start.isoformat(), end=end.isoformat(), receivables=receivables, payables=payables,
+        receivable_total=sum(s.total - (s.paid or 0) for s in receivables), payable_total=sum(p.total - (p.paid or 0) for p in payables))
+
+@app.route('/receivables-payables/export.xlsx')
+@login_required
+def export_receivables_payables():
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    sid = store_id(); start, end = date_range(); wb = Workbook()
+    ar = wb.active; ar.title = 'Accounts Receivable'
+    ar.append(['Invoice', 'Date', 'Customer', 'Payment method', 'Invoice total', 'Amount received', 'Outstanding'])
+    sales_rows = Sale.query.filter(Sale.supermarket_id == sid, func.date(Sale.sale_date) >= start.isoformat(), func.date(Sale.sale_date) <= end.isoformat()).order_by(Sale.sale_date.desc()).all()
+    for sale in sales_rows:
+        due = round(sale.total - (sale.paid or 0), 2)
+        if due > 0.009: ar.append([sale.invoice_no, sale.sale_date.strftime('%Y-%m-%d %H:%M'), sale.customer_name, sale.payment_method, sale.total, sale.paid or 0, due])
+    ap = wb.create_sheet('Accounts Payable')
+    ap.append(['Date', 'Supplier', 'Product', 'Payment method', 'Purchase total', 'Amount paid', 'Outstanding'])
+    purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid, Purchase.purchase_date >= start, Purchase.purchase_date <= end).order_by(Purchase.purchase_date.desc()).all()
+    for purchase in purchase_rows:
+        due = round(purchase.total - (purchase.paid or 0), 2)
+        if due > 0.009: ap.append([purchase.purchase_date.isoformat(), purchase.supplier, purchase.product.name, purchase.payment_method, purchase.total, purchase.paid or 0, due])
+    for sheet in wb.worksheets:
+        sheet.freeze_panes = 'A2'; sheet.auto_filter.ref = sheet.dimensions
+        for cell in sheet[1]: cell.font = Font(bold=True, color='FFFFFF'); cell.fill = PatternFill('solid', fgColor='203B53')
+        for col in sheet.columns:
+            width = min(max(max(len(str(c.value or '')) for c in col) + 2, 12), 32)
+            sheet.column_dimensions[get_column_letter(col[0].column)].width = width
+    output = BytesIO(); wb.save(output); output.seek(0)
+    return send_file(output, as_attachment=True, download_name=f'supermart_ar_ap_{start}_{end}.xlsx', mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 @app.route('/health')
 def health(): return {'status':'ok'}
