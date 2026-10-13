@@ -74,3 +74,13 @@ Open **Sales / Purchase Returns** in the navigation. Select an original sale lin
 
 ## Ageing report
 Open **Aged AR / AP**. Outstanding balances are grouped by age from the original sale or purchase date into Current, 1–30, 31–60, 61–90 and over 90 days. The app currently does not store contractual invoice due dates, so ageing is based on invoice date, not the due date. Print from the page or export both reports to Excel.
+
+## Additional features in this update
+
+- **Configurable expense categories:** open `Expense & payment settings` from the sidebar to add or disable categories for the selected store.
+- **Configurable payment methods:** add or disable payment methods in the same settings page. Active methods are used in sales, purchases, expenses, and customer/supplier settlement forms.
+- **Sales and purchase returns in reports:** date-filtered reports show separate Sales Returns and Purchase Returns tables; the main Excel export includes separate worksheets for each return type.
+- **Product expiry tracking:** enter an optional expiry date when creating a product and an expiry date for each purchase entry. `Expiry alerts` shows expired / near-expiry products and purchase entries due to expire within the selected number of days, with print and Excel export.
+- **Supplier / vendor-wise report:** `Supplier / Vendor report` groups purchases by the supplier name and displays purchase totals, returns, paid amount, outstanding balance, and purchase count. Includes print and Excel export.
+
+Existing SQLite databases are migrated automatically for the new `expiry_date` fields. Back up your database before upgrading. Expiry dates are recorded on products and purchase entries, but this version does not yet track remaining quantity separately for each inventory batch.

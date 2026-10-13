@@ -45,6 +45,7 @@ class Product(db.Model):
     selling_price = db.Column(db.Float, default=0)
     stock_qty = db.Column(db.Float, default=0)
     low_stock_level = db.Column(db.Float, default=5)
+    expiry_date = db.Column(db.Date, nullable=True, index=True)
     active = db.Column(db.Boolean, default=True)
     __table_args__ = (db.UniqueConstraint('supermarket_id', 'name', name='uq_product_name_store'),)
 
@@ -57,6 +58,7 @@ class Purchase(db.Model):
     unit_cost = db.Column(db.Float, nullable=False)
     total = db.Column(db.Float, nullable=False)
     purchase_date = db.Column(db.Date, default=date.today, index=True)
+    expiry_date = db.Column(db.Date, nullable=True, index=True)
     note = db.Column(db.String(250), default='')
     paid = db.Column(db.Float, default=0, nullable=False)
     payment_method = db.Column(db.String(30), default='Credit', nullable=False)
@@ -130,6 +132,20 @@ class PurchaseReturn(db.Model):
     purchase = db.relationship('Purchase')
     product = db.relationship('Product')
 
+class ExpenseCategory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    supermarket_id = db.Column(db.Integer, db.ForeignKey('supermarket.id'), nullable=False, index=True)
+    name = db.Column(db.String(100), nullable=False)
+    active = db.Column(db.Boolean, default=True, nullable=False)
+    __table_args__ = (db.UniqueConstraint('supermarket_id', 'name', name='uq_expense_category_store'),)
+
+class PaymentMethod(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    supermarket_id = db.Column(db.Integer, db.ForeignKey('supermarket.id'), nullable=False, index=True)
+    name = db.Column(db.String(60), nullable=False)
+    active = db.Column(db.Boolean, default=True, nullable=False)
+    __table_args__ = (db.UniqueConstraint('supermarket_id', 'name', name='uq_payment_method_store'),)
+
 class Expense(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     supermarket_id = db.Column(db.Integer, db.ForeignKey('supermarket.id'), nullable=False, index=True)
@@ -139,13 +155,26 @@ class Expense(db.Model):
     amount = db.Column(db.Float, nullable=False)
     payment_method = db.Column(db.String(30), default='Cash')
 
+def seed_store_options(store_id_value):
+    for category_name in ['Rent','Electricity','Water','Staff wages','Transport / delivery','Repairs & maintenance','Internet / phone','Packaging','Other']:
+        if not ExpenseCategory.query.filter_by(supermarket_id=store_id_value, name=category_name).first():
+            db.session.add(ExpenseCategory(supermarket_id=store_id_value, name=category_name))
+    for method_name in ['Cash','UPI','Card','Bank transfer','Credit','Cheque']:
+        if not PaymentMethod.query.filter_by(supermarket_id=store_id_value, name=method_name).first():
+            db.session.add(PaymentMethod(supermarket_id=store_id_value, name=method_name))
+
 with app.app_context():
     db.create_all()
     # Lightweight SQLite schema migration for existing installations.
     from sqlalchemy import inspect
     inspector = inspect(db.engine)
     purchase_columns = {column['name'] for column in inspector.get_columns('purchase')}
+    product_columns = {column['name'] for column in inspector.get_columns('product')}
     with db.engine.begin() as connection:
+        if 'expiry_date' not in purchase_columns:
+            connection.exec_driver_sql('ALTER TABLE purchase ADD COLUMN expiry_date DATE')
+        if 'expiry_date' not in product_columns:
+            connection.exec_driver_sql('ALTER TABLE product ADD COLUMN expiry_date DATE')
         if 'paid' not in purchase_columns:
             connection.exec_driver_sql('ALTER TABLE purchase ADD COLUMN paid FLOAT NOT NULL DEFAULT 0')
         if 'payment_method' not in purchase_columns:
@@ -169,11 +198,15 @@ with app.app_context():
         db.session.add(global_admin); db.session.commit()
     elif not global_admin.is_superadmin:
         global_admin.is_superadmin = True; global_admin.permissions = 'all'; db.session.commit()
+    # Seed configurable expense categories and payment methods for each store.
+    for store in Supermarket.query.all():
+        seed_store_options(store.id)
+    db.session.commit()
 
 def store_id():
     return session.get('active_store_id') or session.get('supermarket_id')
 
-PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables', 'returns':'purchases', 'sales_return':'sales', 'purchase_return':'purchases', 'aging_report':'reports', 'export_aging_report':'reports'}
+PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables', 'returns':'purchases', 'sales_return':'sales', 'purchase_return':'purchases', 'aging_report':'reports', 'export_aging_report':'reports', 'supplier_report':'reports', 'supplier_report_export':'reports', 'expiry_report':'products', 'expiry_report_export':'products', 'settings_lists':'expenses', 'toggle_setting_list':'expenses'}
 
 def login_required(fn):
     @wraps(fn)
@@ -229,7 +262,7 @@ def register():
             flash('This email is already registered. Please sign in.', 'error')
         else:
             supermarket = Supermarket(name=store)
-            db.session.add(supermarket); db.session.flush()
+            db.session.add(supermarket); db.session.flush(); seed_store_options(supermarket.id)
             user = User(supermarket_id=supermarket.id, name=name, email=email, password_hash=generate_password_hash(password))
             db.session.add(user); db.session.commit()
             session.update(user_id=user.id, supermarket_id=supermarket.id, active_store_id=supermarket.id, store_name=supermarket.name, user_name=user.name, is_superadmin=False)
@@ -288,7 +321,7 @@ def admin_create_store():
         flash('That email is already registered. Use a unique email.', 'error')
         return redirect(url_for('admin_console'))
     store = Supermarket(name=store_name)
-    db.session.add(store); db.session.flush()
+    db.session.add(store); db.session.flush(); seed_store_options(store.id)
     owner = User(supermarket_id=store.id, name=owner_name, email=owner_email,
                  password_hash=generate_password_hash(owner_password))
     db.session.add(owner); db.session.commit()
@@ -372,7 +405,9 @@ def products():
         if existing:
             flash('A product with this name already exists.', 'error')
         else:
-            db.session.add(Product(supermarket_id=sid,name=name,sku=sku or None,unit=request.form.get('unit','pcs'),cost_price=cost,selling_price=price,stock_qty=qty,low_stock_level=low)); db.session.commit(); flash('Product added.', 'success')
+            expiry_raw=request.form.get('expiry_date','').strip()
+            expiry=datetime.strptime(expiry_raw,'%Y-%m-%d').date() if expiry_raw else None
+            db.session.add(Product(supermarket_id=sid,name=name,sku=sku or None,unit=request.form.get('unit','pcs'),cost_price=cost,selling_price=price,stock_qty=qty,low_stock_level=low,expiry_date=expiry)); db.session.commit(); flash('Product added.', 'success')
         return redirect(url_for('products'))
     q=request.args.get('q','').strip()
     query=Product.query.filter_by(supermarket_id=sid,active=True)
@@ -390,14 +425,17 @@ def purchases():
             if qty<=0 or cost<0: raise ValueError()
             pdate=datetime.strptime(request.form.get('purchase_date') or date.today().isoformat(),'%Y-%m-%d').date()
             total=qty*cost
-            db.session.add(Purchase(supermarket_id=sid,product_id=product.id,supplier=request.form.get('supplier','').strip(),quantity=qty,unit_cost=cost,total=total,purchase_date=pdate,note=request.form.get('note','').strip(),paid=min(max(float(request.form.get('paid',0)),0),total),payment_method=request.form.get('payment_method','Credit')))
+            expiry_raw=request.form.get('expiry_date','').strip()
+            expiry=datetime.strptime(expiry_raw,'%Y-%m-%d').date() if expiry_raw else None
+            db.session.add(Purchase(supermarket_id=sid,product_id=product.id,supplier=request.form.get('supplier','').strip(),quantity=qty,unit_cost=cost,total=total,purchase_date=pdate,expiry_date=expiry,note=request.form.get('note','').strip(),paid=min(max(float(request.form.get('paid',0)),0),total),payment_method=request.form.get('payment_method','Credit')))
             product.stock_qty += qty; product.cost_price=cost
+            if expiry: product.expiry_date=expiry
             db.session.commit(); flash('Purchase saved and stock updated.', 'success')
         except (ValueError, KeyError):
             db.session.rollback(); flash('Please enter valid purchase details.', 'error')
         return redirect(url_for('purchases'))
     items=Purchase.query.filter_by(supermarket_id=sid).order_by(Purchase.purchase_date.desc(),Purchase.id.desc()).limit(100).all()
-    return render_template('purchases.html', products=Product.query.filter_by(supermarket_id=sid,active=True).order_by(Product.name).all(), purchases=items)
+    return render_template('purchases.html', products=Product.query.filter_by(supermarket_id=sid,active=True).order_by(Product.name).all(), purchases=items, payment_methods=PaymentMethod.query.filter_by(supermarket_id=sid,active=True).order_by(PaymentMethod.name).all())
 
 @app.route('/sales', methods=['GET','POST'])
 @login_required
@@ -432,7 +470,7 @@ def sales():
         except (ValueError, KeyError) as exc:
             db.session.rollback(); flash(str(exc) or 'Please enter valid sale details.', 'error')
             return redirect(url_for('sales'))
-    return render_template('sales.html', products=products_list)
+    return render_template('sales.html', products=products_list, payment_methods=PaymentMethod.query.filter_by(supermarket_id=sid,active=True).order_by(PaymentMethod.name).all())
 
 @app.route('/sales/<int:sale_id>/receipt')
 @login_required
@@ -454,14 +492,16 @@ def expenses():
     if request.method=='POST':
         try:
             amount=float(request.form.get('amount',0)); edate=datetime.strptime(request.form.get('expense_date') or date.today().isoformat(),'%Y-%m-%d').date()
-            category=request.form.get('category','').strip()
-            if amount<=0 or not category: raise ValueError()
-            db.session.add(Expense(supermarket_id=sid,expense_date=edate,category=category,description=request.form.get('description','').strip(),amount=amount,payment_method=request.form.get('payment_method','Cash'))); db.session.commit(); flash('Expense saved.', 'success')
+            category=request.form.get('category','').strip(); method=request.form.get('payment_method','Cash').strip()
+            valid_categories={x.name for x in ExpenseCategory.query.filter_by(supermarket_id=sid,active=True).all()}
+            valid_methods={x.name for x in PaymentMethod.query.filter_by(supermarket_id=sid,active=True).all()}
+            if amount<=0 or category not in valid_categories or method not in valid_methods: raise ValueError()
+            db.session.add(Expense(supermarket_id=sid,expense_date=edate,category=category,description=request.form.get('description','').strip(),amount=amount,payment_method=method)); db.session.commit(); flash('Expense saved.', 'success')
         except ValueError:
             db.session.rollback(); flash('Enter a category and a valid amount.', 'error')
         return redirect(url_for('expenses'))
     rows=Expense.query.filter_by(supermarket_id=sid).order_by(Expense.expense_date.desc(),Expense.id.desc()).limit(100).all()
-    return render_template('expenses.html',expenses=rows)
+    return render_template('expenses.html',expenses=rows,categories=ExpenseCategory.query.filter_by(supermarket_id=sid,active=True).order_by(ExpenseCategory.name).all(),payment_methods=PaymentMethod.query.filter_by(supermarket_id=sid,active=True).order_by(PaymentMethod.name).all())
 
 @app.route('/reports')
 @login_required
@@ -472,7 +512,9 @@ def reports():
     expense_rows=Expense.query.filter(Expense.supermarket_id==sid,Expense.expense_date>=start,Expense.expense_date<=end).order_by(Expense.expense_date.desc()).all()
     cogs=sum(item.quantity*item.cost_price for sale in sales_rows for item in sale.items)
     sales_total=sum(s.total for s in sales_rows)-sum((db.session.query(func.coalesce(func.sum(SalesReturn.amount),0)).filter_by(sale_id=s.id,supermarket_id=sid).scalar() or 0) for s in sales_rows); purchase_total=sum(p.total for p in purchase_rows)-sum((db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(purchase_id=p.id,supermarket_id=sid).scalar() or 0) for p in purchase_rows); expense_total=sum(e.amount for e in expense_rows)
-    return render_template('reports.html',start=start.isoformat(),end=end.isoformat(),sales=sales_rows,purchases=purchase_rows,expenses=expense_rows,sales_total=sales_total,purchase_total=purchase_total,expense_total=expense_total,cogs=cogs,gross_profit=sales_total-cogs,net_estimate=sales_total-cogs-expense_total)
+    sales_returns=SalesReturn.query.filter(SalesReturn.supermarket_id==sid,SalesReturn.return_date>=start,SalesReturn.return_date<=end).order_by(SalesReturn.return_date.desc()).all()
+    purchase_returns=PurchaseReturn.query.filter(PurchaseReturn.supermarket_id==sid,PurchaseReturn.return_date>=start,PurchaseReturn.return_date<=end).order_by(PurchaseReturn.return_date.desc()).all()
+    return render_template('reports.html',start=start.isoformat(),end=end.isoformat(),sales=sales_rows,purchases=purchase_rows,expenses=expense_rows,sales_returns=sales_returns,purchase_returns=purchase_returns,sales_total=sales_total,purchase_total=purchase_total,expense_total=expense_total,cogs=cogs,gross_profit=sales_total-cogs,net_estimate=sales_total-cogs-expense_total)
 
 @app.route('/reports/export.xlsx')
 @login_required
@@ -494,6 +536,10 @@ def export_reports():
     for p in purchase_rows: ws3.append([p.purchase_date.isoformat(),p.product.name,p.supplier,p.quantity,p.unit_cost,p.total,p.paid or 0,max(0,p.total-(p.paid or 0)),p.payment_method,p.note])
     ws4=wb.create_sheet('Expenses'); ws4.append(['Date','Category','Description','Payment','Amount'])
     for e in expense_rows: ws4.append([e.expense_date.isoformat(),e.category,e.description,e.payment_method,e.amount])
+    sr=wb.create_sheet('Sales Returns'); sr.append(['Return Date','Invoice','Customer','Product','Quantity','Amount','Reason'])
+    for r in SalesReturn.query.filter(SalesReturn.supermarket_id==sid,SalesReturn.return_date>=start,SalesReturn.return_date<=end).all(): sr.append([r.return_date.isoformat(),r.sale.invoice_no,r.sale.customer_name,r.product.name,r.quantity,r.amount,r.reason])
+    pr=wb.create_sheet('Purchase Returns'); pr.append(['Return Date','Supplier','Product','Quantity','Amount','Reason'])
+    for r in PurchaseReturn.query.filter(PurchaseReturn.supermarket_id==sid,PurchaseReturn.return_date>=start,PurchaseReturn.return_date<=end).all(): pr.append([r.return_date.isoformat(),r.purchase.supplier,r.product.name,r.quantity,r.amount,r.reason])
     for sheet in wb.worksheets:
         sheet.freeze_panes='A2'; sheet.auto_filter.ref=sheet.dimensions
         for cell in sheet[1]: cell.font=Font(bold=True,color='FFFFFF'); cell.fill=PatternFill('solid',fgColor='203B53')
@@ -529,7 +575,7 @@ def receivables_payables():
     receivables = [sale for sale in sales_rows if sale.total - (sale.paid or 0) - sale.return_total > 0.009]
     payables = [purchase for purchase in purchase_rows if purchase.total - (purchase.paid or 0) - purchase.return_total > 0.009]
     transactions = PaymentTransaction.query.filter_by(supermarket_id=sid).filter(PaymentTransaction.payment_date >= start, PaymentTransaction.payment_date <= end).order_by(PaymentTransaction.payment_date.desc(), PaymentTransaction.id.desc()).all()
-    return render_template('receivables_payables.html', start=start.isoformat(), end=end.isoformat(), receivables=receivables, payables=payables, transactions=transactions,
+    return render_template('receivables_payables.html', start=start.isoformat(), end=end.isoformat(), receivables=receivables, payables=payables, transactions=transactions, payment_methods=PaymentMethod.query.filter_by(supermarket_id=sid,active=True).order_by(PaymentMethod.name).all(),
         receivable_total=sum(max(0, s.total - (s.paid or 0) - s.return_total) for s in receivables), payable_total=sum(max(0, p.total - (p.paid or 0) - p.return_total) for p in payables))
 
 @app.route('/receivables-payables/export.xlsx')
@@ -707,6 +753,84 @@ def export_aging_report():
         for col in ws.columns: ws.column_dimensions[get_column_letter(col[0].column)].width=min(max(max(len(str(c.value or '')) for c in col)+2,12),30)
     out=BytesIO(); wb.save(out); out.seek(0)
     return send_file(out,as_attachment=True,download_name=f'supermart_aging_{today.isoformat()}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+@app.route('/settings/lists', methods=['GET','POST'])
+@login_required
+def settings_lists():
+    sid=store_id()
+    if request.method == 'POST':
+        kind=request.form.get('kind',''); name=request.form.get('name','').strip()
+        if not name:
+            flash('Enter a name.', 'error')
+        elif kind == 'category':
+            if ExpenseCategory.query.filter_by(supermarket_id=sid,name=name).first(): flash('That expense category already exists.', 'error')
+            else: db.session.add(ExpenseCategory(supermarket_id=sid,name=name)); db.session.commit(); flash('Expense category added.', 'success')
+        elif kind == 'payment':
+            if PaymentMethod.query.filter_by(supermarket_id=sid,name=name).first(): flash('That payment method already exists.', 'error')
+            else: db.session.add(PaymentMethod(supermarket_id=sid,name=name)); db.session.commit(); flash('Payment method added.', 'success')
+        else: flash('Invalid list type.', 'error')
+        return redirect(url_for('settings_lists'))
+    return render_template('settings_lists.html', categories=ExpenseCategory.query.filter_by(supermarket_id=sid).order_by(ExpenseCategory.name).all(), methods=PaymentMethod.query.filter_by(supermarket_id=sid).order_by(PaymentMethod.name).all())
+
+@app.route('/settings/lists/<kind>/<int:item_id>/toggle', methods=['POST'])
+@login_required
+def toggle_setting_list(kind,item_id):
+    sid=store_id()
+    model=ExpenseCategory if kind=='category' else PaymentMethod if kind=='payment' else None
+    if model is None: return ('Not found',404)
+    item=model.query.filter_by(id=item_id,supermarket_id=sid).first_or_404(); item.active=not item.active; db.session.commit()
+    flash('Setting updated.', 'success'); return redirect(url_for('settings_lists'))
+
+@app.route('/reports/suppliers')
+@login_required
+def supplier_report():
+    sid=store_id(); start,end=date_range()
+    purchases=Purchase.query.filter(Purchase.supermarket_id==sid,Purchase.purchase_date>=start,Purchase.purchase_date<=end).all()
+    grouped={}
+    for purchase in purchases:
+        name=(purchase.supplier or 'Unspecified supplier').strip()
+        row=grouped.setdefault(name, {'name':name,'purchases':0.0,'returns':0.0,'paid':0.0,'due':0.0,'count':0})
+        returned=db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(supermarket_id=sid,purchase_id=purchase.id).scalar() or 0
+        row['purchases'] += purchase.total; row['returns'] += returned; row['paid'] += purchase.paid or 0
+        row['due'] += max(0,purchase.total-returned-(purchase.paid or 0)); row['count'] += 1
+    rows=sorted(grouped.values(),key=lambda x:x['name'].lower())
+    return render_template('supplier_report.html', rows=rows,start=start.isoformat(),end=end.isoformat(),title='Supplier / Vendor-wise Report')
+
+@app.route('/reports/suppliers/export.xlsx')
+@login_required
+def supplier_report_export():
+    from openpyxl import Workbook
+    from openpyxl.styles import Font,PatternFill
+    from openpyxl.utils import get_column_letter
+    sid=store_id(); start,end=date_range(); purchases=Purchase.query.filter(Purchase.supermarket_id==sid,Purchase.purchase_date>=start,Purchase.purchase_date<=end).all(); grouped={}
+    for p in purchases:
+        name=(p.supplier or 'Unspecified supplier').strip(); row=grouped.setdefault(name,[name,0.0,0.0,0.0,0.0,0]); ret=db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(supermarket_id=sid,purchase_id=p.id).scalar() or 0
+        row[1]+=p.total; row[2]+=ret; row[3]+=p.paid or 0; row[4]+=max(0,p.total-ret-(p.paid or 0)); row[5]+=1
+    wb=Workbook(); ws=wb.active; ws.title='Supplier Vendor Report'; ws.append(['Supplier / Vendor','Purchase Total','Purchase Returns','Paid','Outstanding','Invoices'])
+    for row in sorted(grouped.values(),key=lambda x:x[0].lower()): ws.append(row)
+    for c in ws[1]: c.font=Font(bold=True,color='FFFFFF'); c.fill=PatternFill('solid',fgColor='203B53')
+    for col in ws.columns: ws.column_dimensions[get_column_letter(col[0].column)].width=min(max(max(len(str(c.value or '')) for c in col)+2,12),32)
+    out=BytesIO(); wb.save(out); out.seek(0); return send_file(out,as_attachment=True,download_name=f'supplier_vendor_report_{start}_{end}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+@app.route('/reports/expiry')
+@login_required
+def expiry_report():
+    sid=store_id(); today=date.today(); days=max(1,min(180,int(request.args.get('days',30) or 30))); cutoff=today+timedelta(days=days)
+    products=Product.query.filter(Product.supermarket_id==sid,Product.active.is_(True),Product.expiry_date.isnot(None),Product.expiry_date<=cutoff).order_by(Product.expiry_date.asc()).all()
+    batches=Purchase.query.filter(Purchase.supermarket_id==sid,Purchase.expiry_date.isnot(None),Purchase.expiry_date<=cutoff).order_by(Purchase.expiry_date.asc()).all()
+    return render_template('expiry_report.html',products=products,batches=batches,today=today,cutoff=cutoff,days=days)
+
+@app.route('/reports/expiry/export.xlsx')
+@login_required
+def expiry_report_export():
+    from openpyxl import Workbook
+    sid=store_id(); today=date.today(); days=max(1,min(180,int(request.args.get('days',30) or 30))); cutoff=today+timedelta(days=days)
+    products=Product.query.filter(Product.supermarket_id==sid,Product.active.is_(True),Product.expiry_date.isnot(None),Product.expiry_date<=cutoff).order_by(Product.expiry_date.asc()).all()
+    wb=Workbook(); ws=wb.active; ws.title='Expiry Alert'; ws.append(['Product','SKU','Stock','Expiry date','Days remaining','Status'])
+    for p in products:
+        remaining=(p.expiry_date-today).days; ws.append([p.name,p.sku or '',p.stock_qty,p.expiry_date.isoformat(),remaining,'Expired' if remaining<0 else 'Near expiry'])
+    out=BytesIO(); wb.save(out); out.seek(0); return send_file(out,as_attachment=True,download_name=f'expiry_alert_{today}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 @app.route('/health')
 def health(): return {'status':'ok'}
