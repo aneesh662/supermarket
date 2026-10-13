@@ -238,9 +238,50 @@ def admin_console():
     for store in stores:
         summaries.append({'store': store,
             'sales': db.session.query(func.coalesce(func.sum(Sale.total), 0)).filter_by(supermarket_id=store.id).scalar() or 0,
+            'receivable': db.session.query(func.coalesce(func.sum(Sale.total - Sale.paid), 0)).filter(Sale.supermarket_id == store.id, Sale.total > Sale.paid).scalar() or 0,
+            'payable': db.session.query(func.coalesce(func.sum(Purchase.total - Purchase.paid), 0)).filter(Purchase.supermarket_id == store.id, Purchase.total > Purchase.paid).scalar() or 0,
             'users': User.query.filter_by(supermarket_id=store.id, is_superadmin=False).count(),
             'products': Product.query.filter_by(supermarket_id=store.id).count()})
-    return render_template('admin.html', stores=stores, users=users, summaries=summaries)
+    return render_template('admin.html', stores=stores, users=users, summaries=summaries, store_names={store.id: store.name for store in stores})
+
+@app.route('/admin/store/create', methods=['POST'])
+@login_required
+def admin_create_store():
+    admin = db.session.get(User, session['user_id'])
+    if not admin or not admin.is_superadmin: return ('Forbidden', 403)
+    store_name = request.form.get('store_name', '').strip()
+    owner_name = request.form.get('owner_name', '').strip()
+    owner_email = request.form.get('owner_email', '').strip().lower()
+    owner_password = request.form.get('owner_password', '')
+    if not all([store_name, owner_name, owner_email, owner_password]) or len(owner_password) < 8:
+        flash('Complete all fields. The owner password must be at least 8 characters.', 'error')
+        return redirect(url_for('admin_console'))
+    if User.query.filter_by(email=owner_email).first():
+        flash('That email is already registered. Use a unique email.', 'error')
+        return redirect(url_for('admin_console'))
+    store = Supermarket(name=store_name)
+    db.session.add(store); db.session.flush()
+    owner = User(supermarket_id=store.id, name=owner_name, email=owner_email,
+                 password_hash=generate_password_hash(owner_password))
+    db.session.add(owner); db.session.commit()
+    flash(f'Store {store_name} created with its own owner login.', 'success')
+    return redirect(url_for('admin_console'))
+
+@app.route('/admin/store/<int:sid>/rename', methods=['POST'])
+@login_required
+def admin_rename_store(sid):
+    admin = db.session.get(User, session['user_id'])
+    if not admin or not admin.is_superadmin: return ('Forbidden', 403)
+    store = db.session.get(Supermarket, sid)
+    if not store: return ('Store not found', 404)
+    name = request.form.get('store_name', '').strip()
+    if not name:
+        flash('Store name cannot be blank.', 'error')
+    else:
+        store.name = name; db.session.commit()
+        if session.get('active_store_id') == store.id: session['store_name'] = store.name
+        flash('Store name updated.', 'success')
+    return redirect(url_for('admin_console'))
 
 @app.route('/admin/store/<int:sid>/open', methods=['POST'])
 @login_required
@@ -450,8 +491,9 @@ def accounting():
 def receivables_payables():
     sid = store_id()
     start, end = date_range()
-    sales_rows = Sale.query.filter(Sale.supermarket_id == sid, func.date(Sale.sale_date) >= start.isoformat(), func.date(Sale.sale_date) <= end.isoformat()).order_by(Sale.sale_date.desc()).all()
-    purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid, Purchase.purchase_date >= start, Purchase.purchase_date <= end).order_by(Purchase.purchase_date.desc()).all()
+    # Outstanding balances are shown across ALL dates so old unpaid invoices are never hidden.
+    sales_rows = Sale.query.filter(Sale.supermarket_id == sid).order_by(Sale.sale_date.desc()).all()
+    purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid).order_by(Purchase.purchase_date.desc()).all()
     receivables = [sale for sale in sales_rows if sale.total - (sale.paid or 0) > 0.009]
     payables = [purchase for purchase in purchase_rows if purchase.total - (purchase.paid or 0) > 0.009]
     transactions = PaymentTransaction.query.filter_by(supermarket_id=sid).filter(PaymentTransaction.payment_date >= start, PaymentTransaction.payment_date <= end).order_by(PaymentTransaction.payment_date.desc(), PaymentTransaction.id.desc()).all()
@@ -467,13 +509,13 @@ def export_receivables_payables():
     sid = store_id(); start, end = date_range(); wb = Workbook()
     ar = wb.active; ar.title = 'Accounts Receivable'
     ar.append(['Invoice', 'Date', 'Customer', 'Payment method', 'Invoice total', 'Amount received', 'Outstanding'])
-    sales_rows = Sale.query.filter(Sale.supermarket_id == sid, func.date(Sale.sale_date) >= start.isoformat(), func.date(Sale.sale_date) <= end.isoformat()).order_by(Sale.sale_date.desc()).all()
+    sales_rows = Sale.query.filter(Sale.supermarket_id == sid).order_by(Sale.sale_date.desc()).all()
     for sale in sales_rows:
         due = round(sale.total - (sale.paid or 0), 2)
         if due > 0.009: ar.append([sale.invoice_no, sale.sale_date.strftime('%Y-%m-%d %H:%M'), sale.customer_name, sale.payment_method, sale.total, sale.paid or 0, due])
     ap = wb.create_sheet('Accounts Payable')
     ap.append(['Date', 'Supplier', 'Product', 'Payment method', 'Purchase total', 'Amount paid', 'Outstanding'])
-    purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid, Purchase.purchase_date >= start, Purchase.purchase_date <= end).order_by(Purchase.purchase_date.desc()).all()
+    purchase_rows = Purchase.query.filter(Purchase.supermarket_id == sid).order_by(Purchase.purchase_date.desc()).all()
     for purchase in purchase_rows:
         due = round(purchase.total - (purchase.paid or 0), 2)
         if due > 0.009: ap.append([purchase.purchase_date.isoformat(), purchase.supplier, purchase.product.name, purchase.payment_method, purchase.total, purchase.paid or 0, due])
