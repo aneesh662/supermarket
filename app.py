@@ -206,7 +206,7 @@ with app.app_context():
 def store_id():
     return session.get('active_store_id') or session.get('supermarket_id')
 
-PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables', 'returns':'purchases', 'sales_return':'sales', 'purchase_return':'purchases', 'aging_report':'reports', 'export_aging_report':'reports', 'supplier_report':'reports', 'supplier_report_export':'reports', 'expiry_report':'products', 'expiry_report_export':'products', 'settings_lists':'expenses', 'toggle_setting_list':'expenses'}
+PERMISSIONS = {'sales':'sales', 'sale_receipt':'sales', 'sales_history':'sales', 'purchases':'purchases', 'products':'products', 'expenses':'expenses', 'reports':'reports', 'export_reports':'reports', 'accounting':'accounting', 'receivables_payables':'receivables_payables', 'export_receivables_payables':'receivables_payables', 'receive_customer_payment':'receivables_payables', 'pay_supplier':'receivables_payables', 'payment_receipt':'receivables_payables', 'returns':'purchases', 'sales_return':'sales', 'purchase_return':'purchases', 'aging_report':'reports', 'export_aging_report':'reports', 'supplier_report':'reports', 'supplier_report_export':'reports', 'customer_report':'reports', 'customer_report_export':'reports', 'expiry_report':'products', 'expiry_report_export':'products', 'settings_lists':'expenses', 'toggle_setting_list':'expenses'}
 
 def login_required(fn):
     @wraps(fn)
@@ -795,7 +795,52 @@ def supplier_report():
         row['purchases'] += purchase.total; row['returns'] += returned; row['paid'] += purchase.paid or 0
         row['due'] += max(0,purchase.total-returned-(purchase.paid or 0)); row['count'] += 1
     rows=sorted(grouped.values(),key=lambda x:x['name'].lower())
-    return render_template('supplier_report.html', rows=rows,start=start.isoformat(),end=end.isoformat(),title='Supplier / Vendor-wise Report')
+    totals={key:sum(row[key] for row in rows) for key in ('purchases','returns','paid','due','count')}
+    return render_template('supplier_report.html', rows=rows,totals=totals,start=start.isoformat(),end=end.isoformat(),title='Supplier / Vendor-wise Total Report')
+
+@app.route('/reports/customers')
+@login_required
+def customer_report():
+    sid=store_id(); start,end=date_range()
+    sales=Sale.query.filter(Sale.supermarket_id==sid,func.date(Sale.sale_date)>=start,func.date(Sale.sale_date)<=end).all()
+    grouped={}
+    for sale in sales:
+        name=(sale.customer_name or 'Walk-in customer').strip() or 'Walk-in customer'
+        row=grouped.setdefault(name, {'name':name,'sales':0.0,'returns':0.0,'received':0.0,'due':0.0,'count':0})
+        returned=db.session.query(func.coalesce(func.sum(SalesReturn.amount),0)).filter_by(supermarket_id=sid,sale_id=sale.id).scalar() or 0
+        row['sales'] += sale.total or 0
+        row['returns'] += returned
+        row['received'] += sale.paid or 0
+        row['due'] += max(0,(sale.total or 0)-returned-(sale.paid or 0))
+        row['count'] += 1
+    rows=sorted(grouped.values(),key=lambda x:x['name'].lower())
+    totals={key:sum(row[key] for row in rows) for key in ('sales','returns','received','due','count')}
+    return render_template('customer_report.html',rows=rows,totals=totals,start=start.isoformat(),end=end.isoformat(),title='Customer-wise Total Report')
+
+@app.route('/reports/customers/export.xlsx')
+@login_required
+def customer_report_export():
+    from openpyxl import Workbook
+    from openpyxl.styles import Font,PatternFill
+    from openpyxl.utils import get_column_letter
+    sid=store_id(); start,end=date_range()
+    sales=Sale.query.filter(Sale.supermarket_id==sid,func.date(Sale.sale_date)>=start,func.date(Sale.sale_date)<=end).all()
+    grouped={}
+    for sale in sales:
+        name=(sale.customer_name or 'Walk-in customer').strip() or 'Walk-in customer'
+        row=grouped.setdefault(name,[name,0.0,0.0,0.0,0.0,0])
+        returned=db.session.query(func.coalesce(func.sum(SalesReturn.amount),0)).filter_by(supermarket_id=sid,sale_id=sale.id).scalar() or 0
+        row[1]+=sale.total or 0; row[2]+=returned; row[3]+=sale.paid or 0; row[4]+=max(0,(sale.total or 0)-returned-(sale.paid or 0)); row[5]+=1
+    wb=Workbook(); ws=wb.active; ws.title='Customer Report'
+    ws.append(['Customer','Sales Total','Sales Returns','Received','Outstanding','Invoices'])
+    ordered=sorted(grouped.values(),key=lambda x:x[0].lower())
+    for row in ordered: ws.append(row)
+    ws.append(['GRAND TOTAL']+[sum(row[i] for row in ordered) for i in range(1,6)])
+    for c in ws[1]: c.font=Font(bold=True,color='FFFFFF'); c.fill=PatternFill('solid',fgColor='203B53')
+    for c in ws[ws.max_row]: c.font=Font(bold=True)
+    for col in ws.columns: ws.column_dimensions[get_column_letter(col[0].column)].width=min(max(max(len(str(c.value or '')) for c in col)+2,12),32)
+    out=BytesIO(); wb.save(out); out.seek(0)
+    return send_file(out,as_attachment=True,download_name=f'customer_report_{start}_{end}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 @app.route('/reports/suppliers/export.xlsx')
 @login_required
@@ -808,8 +853,11 @@ def supplier_report_export():
         name=(p.supplier or 'Unspecified supplier').strip(); row=grouped.setdefault(name,[name,0.0,0.0,0.0,0.0,0]); ret=db.session.query(func.coalesce(func.sum(PurchaseReturn.amount),0)).filter_by(supermarket_id=sid,purchase_id=p.id).scalar() or 0
         row[1]+=p.total; row[2]+=ret; row[3]+=p.paid or 0; row[4]+=max(0,p.total-ret-(p.paid or 0)); row[5]+=1
     wb=Workbook(); ws=wb.active; ws.title='Supplier Vendor Report'; ws.append(['Supplier / Vendor','Purchase Total','Purchase Returns','Paid','Outstanding','Invoices'])
-    for row in sorted(grouped.values(),key=lambda x:x[0].lower()): ws.append(row)
+    ordered=sorted(grouped.values(),key=lambda x:x[0].lower())
+    for row in ordered: ws.append(row)
+    ws.append(['GRAND TOTAL']+[sum(row[i] for row in ordered) for i in range(1,6)])
     for c in ws[1]: c.font=Font(bold=True,color='FFFFFF'); c.fill=PatternFill('solid',fgColor='203B53')
+    for c in ws[ws.max_row]: c.font=Font(bold=True)
     for col in ws.columns: ws.column_dimensions[get_column_letter(col[0].column)].width=min(max(max(len(str(c.value or '')) for c in col)+2,12),32)
     out=BytesIO(); wb.save(out); out.seek(0); return send_file(out,as_attachment=True,download_name=f'supplier_vendor_report_{start}_{end}.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 

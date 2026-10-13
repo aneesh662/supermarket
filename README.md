@@ -84,3 +84,10 @@ Open **Aged AR / AP**. Outstanding balances are grouped by age from the original
 - **Supplier / vendor-wise report:** `Supplier / Vendor report` groups purchases by the supplier name and displays purchase totals, returns, paid amount, outstanding balance, and purchase count. Includes print and Excel export.
 
 Existing SQLite databases are migrated automatically for the new `expiry_date` fields. Back up your database before upgrading. Expiry dates are recorded on products and purchase entries, but this version does not yet track remaining quantity separately for each inventory batch.
+
+
+## Customer and supplier total reports
+- **Supplier / Vendor-wise Total Report** groups purchase entries by supplier and shows purchase total, purchase returns, paid amount, outstanding balance and purchase count, with a grand total row.
+- **Customer-wise Total Report** groups sales by customer and shows sales total, sales returns, amount received, outstanding balance and invoice count, with a grand total row.
+- Both reports support date filters, print and Excel export. The report navigation is permission-controlled under Reports.
+- Responsive layout safeguards cover small phones, tablets, laptops and desktop screens; wide tables scroll horizontally on narrow screens.
